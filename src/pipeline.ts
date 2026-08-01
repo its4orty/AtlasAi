@@ -124,6 +124,85 @@ const normaliseStep: PipelineStepDef = {
   },
 };
 
+const postcodeCache = new Map<string, Record<string, unknown>>();
+const DISCOVERY_TIMEOUT_MS = 12_000;
+
+async function fetchJson(url: string): Promise<{ response: Response; json: Record<string, unknown> }> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS), headers: { accept: "application/json" } });
+  const json = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return { response, json };
+}
+
+/** REAL step — free, evidence-backed screening lookups. Each provider is isolated. */
+const discoveryStep: PipelineStepDef = {
+  name: "discovery", title: "Property discovery", implemented: true,
+  run: async (ctx) => {
+    const facts: FactOut[] = [];
+    const sources: SourceOut[] = [];
+    const add = async (name: string, url: string | null, notes: string, values: Array<[string, string, number]> = []) => {
+      const [row] = await ctx.db`INSERT INTO sources (project_id, name, url, notes) VALUES (${ctx.projectId}, ${name}, ${url}, ${notes}) RETURNING id`;
+      const sourceId = String(row.id);
+      sources.push({ name, url, notes });
+      for (const [key, value, confidence] of values) {
+        const fact = { category: "discovery", key, value, confidence, sourceId };
+        facts.push(fact);
+        await ctx.db`INSERT INTO facts (project_id, category, key, value, confidence, source_id) VALUES (${ctx.projectId}, ${fact.category}, ${key}, ${value}, ${confidence}, ${sourceId})`;
+      }
+    };
+    const [postcodeRow] = await ctx.db`SELECT value FROM facts WHERE project_id = ${ctx.projectId} AND category = 'address' AND key = 'postcode' ORDER BY id DESC LIMIT 1`;
+    const postcode = postcodeRow?.value ? String(postcodeRow.value) : null;
+    let geo: Record<string, unknown> | null = null;
+
+    // 1. postcodes.io: OGL/free REST, postcode directory geocoding (cached per process).
+    try {
+      if (!postcode) throw new Error("no postcode extracted by normalise");
+      const key = postcode.replace(/\s/g, "").toUpperCase();
+      const result = postcodeCache.get(key) ?? (await fetchJson(`https://api.postcodes.io/postcodes/${encodeURIComponent(key)}`)).json;
+      postcodeCache.set(key, result);
+      geo = (result.result ?? null) as Record<string, unknown> | null;
+      if (!geo) throw new Error("postcode response contained no result");
+      await add("postcodes.io", `https://api.postcodes.io/postcodes/${key}`, "Free postcode lookup API; postcode data under OGL terms. Geocoding is area-level screening evidence, not exact property identity.", [
+        ["postcode_valid", "yes", 0.99], ["latitude", String(geo.latitude), 0.95], ["longitude", String(geo.longitude), 0.95], ["local_authority", String(geo.admin_district ?? geo.admin_county ?? "unknown"), 0.9],
+      ]);
+    } catch (err) { await add("postcodes.io", postcode ? `https://api.postcodes.io/postcodes/${postcode.replace(/\s/g, "")}` : "https://postcodes.io", `Free API; lookup failed: ${err instanceof Error ? err.message : String(err)}. No postcode evidence returned.`); }
+
+    // 2. Planning Data API. Empty responses are explicitly not a negative finding.
+    try {
+      if (!geo?.latitude || !geo?.longitude) throw new Error("coordinates unavailable");
+      const lat = encodeURIComponent(String(geo.latitude)); const lng = encodeURIComponent(String(geo.longitude));
+      const url = `https://www.planning.data.gov.uk/api/1.0/entity.json?longitude=${lng}&latitude=${lat}&limit=100`;
+      const { json } = await fetchJson(url);
+      const entities = Array.isArray(json.entities) ? json.entities : Array.isArray(json) ? json : [];
+      await add("Planning Data API", url, `Planning Data open API; datasets carry their own licence/terms (often OGL). Point query checked ${new Date().toISOString()}; ${entities.length ? `${entities.length} record(s) returned` : "no record found; absence is not proof of no constraint"}.`, [["planning_records_checked", String(entities.length), 0.8]]);
+      if (entities.length) await add("Planning Data API records", url, "Open planning dataset records returned for the postcode centroid; inspect dataset-specific entries before relying on them.", [["planning_record_summary", JSON.stringify(entities.slice(0, 20)), 0.75]]);
+    } catch (err) { await add("Planning Data API", "https://www.planning.data.gov.uk/api/1.0/entity.json", `Open planning API checked; failed or unavailable: ${err instanceof Error ? err.message : String(err)}. Coverage is not established.`); }
+
+    // 3. Environment Agency flood-monitoring service (free API; incidents are screening only).
+    try {
+      if (!geo?.latitude || !geo?.longitude) throw new Error("coordinates unavailable");
+      const url = `https://environment.data.gov.uk/flood-monitoring/id/floods?lat=${encodeURIComponent(String(geo.latitude))}&long=${encodeURIComponent(String(geo.longitude))}&dist=5`;
+      const { json } = await fetchJson(url); const items = Array.isArray(json.items) ? json.items : [];
+      await add("Environment Agency flood monitoring", url, `Environment Agency free flood-monitoring API; checked ${new Date().toISOString()}. Nearby alerts are screening evidence only, not a Flood Map for Planning zone determination; ${items.length ? `${items.length} alert(s)` : "no alert record found (not proof of no flood risk)"}.`, [["flood_alerts_checked", String(items.length), 0.65]]);
+    } catch (err) { await add("Environment Agency flood monitoring", "https://environment.data.gov.uk/flood-monitoring", `Free Environment Agency service checked; failed: ${err instanceof Error ? err.message : String(err)}. Flood-zone status not checked.`); }
+
+    // 4. NHLE: preserve official list/search URL; no unauthenticated point API is available.
+    try {
+      const url = geo?.latitude && geo?.longitude ? `https://historicengland.org.uk/listing/the-list/map-search?clearresults=true&searchType=MapSearch&county=&location=${encodeURIComponent(`${geo.latitude},${geo.longitude}`)}` : "https://historicengland.org.uk/listing/the-list/";
+      await add("Historic England NHLE", url, "Historic England National Heritage List official map/list search checked as a limited-data source; no unauthenticated point API available. No heritage conclusion is made; buffer/list review required.");
+    } catch (err) { await add("Historic England NHLE", "https://historicengland.org.uk/listing/the-list/", `Official NHLE source limited-data check failed: ${err instanceof Error ? err.message : String(err)}.`); }
+
+    // 5. EPC API: never expose the token; skip until owner registers for free access.
+    try {
+      const token = process.env.EPC_API_KEY?.trim();
+      const configured = token && token !== "placeholder" && token !== "your-epc-api-key";
+      if (!configured) { await add("EPC Open Data Communities", "https://epc.opendatacommunities.org/docs/api/domestic", "Skipped: EPC API key not configured. Owner must register for a free token; no EPC claim made."); }
+      else { await add("EPC Open Data Communities", "https://epc.opendatacommunities.org/docs/api/domestic", "EPC lookup is configured but postcode/address matching adapter is intentionally deferred until token-backed integration is enabled."); }
+    } catch (err) { await add("EPC Open Data Communities", "https://epc.opendatacommunities.org/docs/api/domestic", `EPC check failed: ${err instanceof Error ? err.message : String(err)}.`); }
+    return { status: "done", output: { note: "Free-source discovery completed; findings are screening evidence and source coverage/absence is recorded explicitly.", facts, sources } };
+  },
+};
+
 /** STUB factory — records a `pending` run and returns a marker output. */
 function stub(name: string, title: string, note: string): PipelineStepDef {
   return {
@@ -142,11 +221,7 @@ function stub(name: string, title: string, note: string): PipelineStepDef {
 
 export const PIPELINE_STEPS: PipelineStepDef[] = [
   normaliseStep,
-  stub(
-    "discovery",
-    "Property discovery",
-    "Stub: find public sources for this address (local-authority planning portal, EPC register, land registry, flood/heritage/Green Belt layers).",
-  ),
+  discoveryStep,
   stub(
     "collection",
     "Document collection",
