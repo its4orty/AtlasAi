@@ -157,7 +157,7 @@ const discoveryStep: PipelineStepDef = {
     // 1. postcodes.io: OGL/free REST, postcode directory geocoding (cached per process).
     try {
       if (!postcode) throw new Error("no postcode extracted by normalise");
-      const key = postcode.replace(/\\s/g, "").toUpperCase();
+      const key = postcode.replace(/\s/g, "").toUpperCase();
       const result = postcodeCache.get(key) ?? (await fetchJson(`https://api.postcodes.io/postcodes/${encodeURIComponent(key)}`)).json;
       postcodeCache.set(key, result);
       geo = (result.result ?? null) as Record<string, unknown> | null;
@@ -165,7 +165,7 @@ const discoveryStep: PipelineStepDef = {
       await add("postcodes.io", `https://api.postcodes.io/postcodes/${key}`, "Free postcode lookup API; postcode data under OGL terms. Geocoding is area-level screening evidence, not exact property identity.", [
         ["postcode_valid", "yes", 0.99], ["latitude", String(geo.latitude), 0.95], ["longitude", String(geo.longitude), 0.95], ["local_authority", String(geo.admin_district ?? geo.admin_county ?? "unknown"), 0.9],
       ]);
-    } catch (err) { await add("postcodes.io", postcode ? `https://api.postcodes.io/postcodes/${postcode.replace(/\\s/g, "")}` : "https://postcodes.io", `Free API; lookup failed: ${err instanceof Error ? err.message : String(err)}. No postcode evidence returned.`); }
+    } catch (err) { await add("postcodes.io", postcode ? `https://api.postcodes.io/postcodes/${postcode.replace(/\s/g, "")}` : "https://postcodes.io", `Free API; lookup failed: ${err instanceof Error ? err.message : String(err)}. No postcode evidence returned.`); }
 
     // 2. Planning Data API. Empty responses are explicitly not a negative finding.
     try {
