@@ -145,6 +145,20 @@ function ProjectView() {
             </p>
 
             <div className="panel" style={{ marginTop: 34 }}>
+              <p className="section-label">FEASIBILITY REPORT</p>
+              <p className="form-note" style={{ margin: "0 0 12px" }}>
+                The evidence-backed, printable feasibility screening for this
+                project (advisory only — not professional advice).
+              </p>
+              <a
+                className="button"
+                style={{ textDecoration: "none", display: "inline-block" }}
+                href={`/report/${id}`}
+              >
+                View feasibility report <span>↗</span>
+              </a>
+            </div>
+            <div className="panel" style={{ marginTop: 22 }}>
               <p className="section-label">PIPELINE STEPS</p>
               <ol className="steps">
                 {state.data.runs.map((s, i) => (
