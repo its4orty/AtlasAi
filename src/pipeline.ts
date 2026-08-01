@@ -12,8 +12,8 @@ import { ensureSchema, toJson, rowsToJson } from "~/project-schema";
  *
  * Pipeline order (later phases drop in behind the stubs):
  *   1. normalise     — REAL: address normalisation & validation (local only)
- *   2. discovery     — STUB: find public sources for the address (next task)
- *   3. collection    — STUB: fetch/organise documents into the project
+ *   2. discovery     — REAL: find public sources for the address
+ *   3. collection    — REAL: comparables evidence from the local Price Paid index
  *   4. intelligence  — STUB: extract structured facts with confidence scores
  *   5. feasibility   — STUB: financial pro-forma (ROI, cashflow, sensitivity)
  *   6. report        — STUB: render the evidence-backed feasibility report
@@ -203,6 +203,128 @@ const discoveryStep: PipelineStepDef = {
   },
 };
 
+/**
+ * REAL step — collect market evidence from the local HM Land Registry Price
+ * Paid comparables index (loaded by scripts/import-price-paid.ts). Queries the
+ * project's exact postcode and its postcode sector, most recent sales first,
+ * and writes honest per-fact confidence (sample-size aware). The step never
+ * fails the project: an unloaded/empty index or a query failure is recorded
+ * per-source with an explicit note and the step still completes.
+ */
+const collectionStep: PipelineStepDef = {
+  name: "collection",
+  title: "Evidence collection (Price Paid comparables)",
+  implemented: true,
+  run: async (ctx) => {
+    const facts: FactOut[] = [];
+    const sources: SourceOut[] = [];
+    const add = async (name: string, url: string | null, notes: string, values: Array<[string, string, number]> = []) => {
+      const [row] = await ctx.db`INSERT INTO sources (project_id, name, url, notes) VALUES (${ctx.projectId}, ${name}, ${url}, ${notes}) RETURNING id`;
+      const sourceId = String(row.id);
+      sources.push({ name, url, notes });
+      for (const [key, value, confidence] of values) {
+        const fact = { category: "market", key, value, confidence, sourceId };
+        facts.push(fact);
+        await ctx.db`INSERT INTO facts (project_id, category, key, value, confidence, source_id) VALUES (${ctx.projectId}, ${fact.category}, ${key}, ${value}, ${confidence}, ${sourceId})`;
+      }
+    };
+    // The gov.uk collection page is the canonical source URL (the monthly CSV
+    // itself lives on the publicdata.landregistry.gov.uk bucket documented there).
+    const PRICE_PAID_URL = "https://www.gov.uk/government/statistical-data-sets/price-paid-data-downloads";
+    const [postcodeRow] = await ctx.db`SELECT value FROM facts WHERE project_id = ${ctx.projectId} AND category = 'address' AND key = 'postcode' ORDER BY id DESC LIMIT 1`;
+    const postcode = postcodeRow?.value ? String(postcodeRow.value) : null;
+
+    try {
+      if (!postcode) throw new Error("no postcode extracted by normalise");
+      const [idx] = await ctx.db`SELECT COUNT(*)::int AS n FROM price_paid`;
+      const indexCount = Number(idx?.n ?? 0);
+
+      if (indexCount === 0) {
+        // Index not loaded yet — record honest absence, never fail the step.
+        await add(
+          "HM Land Registry Price Paid",
+          PRICE_PAID_URL,
+          "Price Paid index not yet loaded — no comparables evidence. Run scripts/import-price-paid.ts to load the free OGL monthly CSV, then resume this project.",
+          [["comparables_count", "0", 1]],
+        );
+      } else {
+        // Postcode sector = outward code + first digit of inward (SE19 3AT → SE19 3).
+        const compact = postcode.replace(/\s+/g, "").toUpperCase();
+        const sectorCompact = compact.slice(0, compact.length - 2);
+        const sector = sectorCompact.length > 1 ? `${sectorCompact.slice(0, -1)} ${sectorCompact.slice(-1)}` : sectorCompact;
+
+        // Completed sales at the exact postcode and across the sector, most
+        // recent first (bounded so project memory stays small).
+        const exact = await ctx.db`
+          SELECT price, transfer_date, postcode, property_type, tenure
+          FROM price_paid WHERE replace(postcode, ' ', '') = ${compact}
+          ORDER BY transfer_date DESC, price DESC LIMIT 10`;
+        const sectorRows = await ctx.db`
+          SELECT price, transfer_date, postcode, property_type, tenure, town_city
+          FROM price_paid WHERE replace(postcode, ' ', '') LIKE ${sectorCompact + "%"}
+          ORDER BY transfer_date DESC, price DESC LIMIT 200`;
+        const [coverage] = await ctx.db`
+          SELECT MIN(transfer_date)::text AS min_d, MAX(transfer_date)::text AS max_d FROM price_paid`;
+
+        const n = sectorRows.length;
+        const prices = sectorRows.map((r) => Number(r.price)).sort((a, b) => a - b);
+        const median = n ? prices[Math.floor(prices.length / 2)] : null;
+        const min = n ? prices[0] : null;
+        const max = n ? prices[n - 1] : null;
+        // Neon returns DATE columns as JS Dates — normalise to ISO (yyyy-mm-dd).
+        const fmtDate = (v: unknown) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
+        const mostRecent = sectorRows[0] ? fmtDate(sectorRows[0].transfer_date) : null;
+        // Confidence is sample-size aware: the official register is authoritative
+        // for what it contains, but a small sample is weak evidence of an area.
+        const conf = (base: number) => (n >= 10 ? base : n >= 3 ? base - 0.15 : n >= 1 ? base - 0.3 : 0);
+
+        const values: Array<[string, string, number]> = [
+          ["comparables_sector", sector, 0.99],
+          ["comparables_count", String(n), 0.98],
+          ["comparables_postcode_count", String(exact.length), 0.98],
+          ["most_recent_sale_date", mostRecent ?? "", n ? 0.9 : 0],
+          ["comparables_coverage_window", `${coverage?.min_d ?? "?"} to ${coverage?.max_d ?? "?"}`, 0.98],
+        ];
+        if (median !== null) {
+          values.push(["comparables_median_price", String(median), conf(0.9)]);
+          values.push(["comparables_min_max", `${min},${max}`, conf(0.85)]);
+        }
+        await add(
+          "HM Land Registry Price Paid",
+          PRICE_PAID_URL,
+          `HM Land Registry Price Paid Data (free, Open Government Licence v3). Completed registered sale prices only — never asking prices or marketing valuations. Local index loaded from the monthly CSV (pp-monthly-update-new-version.csv); coverage window ${coverage?.min_d ?? "?"} to ${coverage?.max_d ?? "?"}. Sector ${sector}: ${n} completed sale(s), ${exact.length} at the exact postcode. Median/min/max confidence reflects sample size.`,
+          values,
+        );
+      }
+    } catch (err) {
+      await add(
+        "HM Land Registry Price Paid",
+        PRICE_PAID_URL,
+        `Price Paid comparables check failed: ${err instanceof Error ? err.message : String(err)}. No comparables evidence recorded for this project.`,
+        [["comparables_count", "0", 1]],
+      );
+    }
+
+    // Evidence-assembly summary. PLACEHOLDER: document intake (user-uploaded
+    // PDFs, planning/EPC records fetched by later adapters) is NOT in scope yet
+    // — the count below covers only the evidence items this step assembles,
+    // which today is the comparables evidence recorded above.
+    await ctx.db`
+      INSERT INTO facts (project_id, category, key, value, confidence, source_id)
+      VALUES (${ctx.projectId}, 'collection', 'evidence_items_collected', '0', 1, NULL)`;
+    facts.push({ category: "collection", key: "evidence_items_collected", value: "0", confidence: 1, sourceId: null });
+
+    return {
+      status: "done",
+      output: {
+        note: "Comparables evidence collected from the local HM Land Registry Price Paid index (completed sales only; see source notes for coverage).",
+        facts,
+        sources,
+      },
+    };
+  },
+};
+
 /** STUB factory — records a `pending` run and returns a marker output. */
 function stub(name: string, title: string, note: string): PipelineStepDef {
   return {
@@ -222,11 +344,7 @@ function stub(name: string, title: string, note: string): PipelineStepDef {
 export const PIPELINE_STEPS: PipelineStepDef[] = [
   normaliseStep,
   discoveryStep,
-  stub(
-    "collection",
-    "Document collection",
-    "Stub: fetch and organise documents into the project (planning, EPC, floorplans, legal, history, metadata).",
-  ),
+  collectionStep,
   stub(
     "intelligence",
     "Document intelligence",

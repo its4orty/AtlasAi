@@ -4,9 +4,9 @@ import { runPipeline } from "~/pipeline";
 /**
  * POST /api/analyse — start an analysis.
  * Body: { address: string }. Creates a project row and runs the full pipeline
- * (normalise is real; discovery/collection/intelligence/feasibility/report are
- * stubs that record themselves as `pending`). Returns the project id and the
- * ordered step statuses.
+ * (normalise, discovery and collection are real; intelligence/feasibility/
+ * report are stubs that record themselves as `pending`). Returns the project
+ * id and the ordered step statuses.
  */
 export const Route = createFileRoute("/api/analyse")({
   server: {

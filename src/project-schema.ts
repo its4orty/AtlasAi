@@ -47,6 +47,13 @@ import { sql } from "~/db";
  *   error    → step threw; `error` holds the message
  * `started_at`/`finished_at` bracket the step.
  *
+ * ── price_paid ──────────────────────────────────────────────────────────
+ * GLOBAL (cross-project) local index of HM Land Registry Price Paid data —
+ * completed, registered sale prices only (never asking prices), OGL licence.
+ * Imported from the free monthly CSV by scripts/import-price-paid.ts
+ * (idempotent batch inserts, ON CONFLICT DO NOTHING). Not keyed to projects:
+ * the collection pipeline step queries it for the project's postcode/sector.
+ *
  * Tables are created with CREATE TABLE IF NOT EXISTS (the same pattern as the
  * waitlist table) and enforced lazily via ensureSchema() before first use —
  * no migration tooling.
@@ -112,6 +119,29 @@ export async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions (project_id)`;
   await db`
     CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs (project_id)`;
+
+  // Global Price Paid comparables index (see header comment). CREATE TABLE IF
+  // NOT EXISTS + ON CONFLICT DO NOTHING imports make this safe to run anywhere,
+  // any number of times.
+  await db`
+    CREATE TABLE IF NOT EXISTS price_paid (
+      transaction_id TEXT PRIMARY KEY,
+      price INTEGER NOT NULL,
+      transfer_date DATE NOT NULL,
+      postcode TEXT NOT NULL,
+      property_type TEXT,
+      new_build BOOLEAN,
+      tenure TEXT,
+      locality TEXT,
+      town_city TEXT,
+      district TEXT,
+      county TEXT
+    )`;
+  await db`
+    CREATE INDEX IF NOT EXISTS idx_price_paid_postcode ON price_paid (postcode)`;
+  await db`
+    CREATE INDEX IF NOT EXISTS idx_price_paid_transfer_date ON price_paid (transfer_date)`;
+
   schemaReady = true;
 }
 
