@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 96" role="img" aria-labelledby="title desc">
+  <title id="title">ATLAS AI</title><desc id="desc">ATLAS AI wordmark with an architectural A mark</desc>
+  <g fill="none" stroke="#C98A4A" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M12 78 42 14l30 64M25 52h34"/>
+    <path d="M42 14v-8M34 31l8-17 8 17" opacity=".72"/>
+  </g>
+  <path d="M83 15h14v66H83z" fill="#F4F0E8"/>
+  <text x="115" y="63" fill="#F4F0E8" font-family="Arial,Helvetica,sans-serif" font-size="47" font-weight="700" letter-spacing="9">ATLAS</text>
+  <text x="332" y="63" fill="#C98A4A" font-family="Arial,Helvetica,sans-serif" font-size="47" font-weight="400" letter-spacing="3">AI</text>
+</svg>
