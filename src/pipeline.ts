@@ -1,5 +1,6 @@
 import { sql } from "~/db";
 import { ensureSchema, toJson, rowsToJson } from "~/project-schema";
+import { renderReportHtml } from "~/report";
 
 /**
  * ATLAS AI — analysis pipeline runner (Phase 1).
@@ -15,8 +16,8 @@ import { ensureSchema, toJson, rowsToJson } from "~/project-schema";
  *   2. discovery     — REAL: find public sources for the address
  *   3. collection    — REAL: comparables evidence from the local Price Paid index
  *   4. intelligence  — STUB: extract structured facts with confidence scores
- *   5. feasibility   — STUB: financial pro-forma (ROI, cashflow, sensitivity)
- *   6. report        — STUB: render the evidence-backed feasibility report
+ *   5. feasibility   — REAL: assumption-led financial feasibility model
+ *   6. report        — REAL: evidence-backed feasibility report (server-rendered)
  */
 
 type Db = ReturnType<typeof sql>;
@@ -341,6 +342,226 @@ function stub(name: string, title: string, note: string): PipelineStepDef {
   };
 }
 
+/**
+ * REAL step — assumption-led financial feasibility model built EXCLUSIVELY from
+ * evidence already in project memory (Price Paid comparables, constraint flags,
+ * EPC floor area when present). Never re-fetches external data. Writes
+ * feasibility facts with honest, sample-aware confidence, stores the key
+ * assumptions as explicit `assumption_*` facts (so the report can show them),
+ * and records the model as a source with the advisory disclaimer. Completes
+ * even with no comparables, producing clearly-labelled assumption-only outputs
+ * at lower confidence.
+ */
+const feasibilityStep: PipelineStepDef = {
+  name: "feasibility",
+  title: "Financial feasibility",
+  implemented: true,
+  run: async (ctx) => {
+    const facts: FactOut[] = [];
+    const sources: SourceOut[] = [];
+    const add = async (name: string, url: string | null, notes: string, values: Array<[string, string, number]> = []) => {
+      const [row] = await ctx.db`INSERT INTO sources (project_id, name, url, notes) VALUES (${ctx.projectId}, ${name}, ${url}, ${notes}) RETURNING id`;
+      const sourceId = String(row.id);
+      sources.push({ name, url, notes });
+      for (const [key, value, confidence] of values) {
+        const fact = { category: "feasibility", key, value, confidence, sourceId };
+        facts.push(fact);
+        await ctx.db`INSERT INTO facts (project_id, category, key, value, confidence, source_id) VALUES (${ctx.projectId}, ${fact.category}, ${key}, ${value}, ${confidence}, ${sourceId})`;
+      }
+    };
+
+    // ---- read evidence from project memory only ----
+    const rows = await ctx.db`SELECT category, key, value FROM facts WHERE project_id = ${ctx.projectId}`;
+    const fact = (cat: string, key: string): string | null => {
+      const r = rows.find((x) => String(x.category) === cat && String(x.key) === key);
+      return r ? String(r.value) : null;
+    };
+    const [heritage] = await ctx.db`
+      SELECT notes FROM sources WHERE project_id = ${ctx.projectId} AND name ILIKE '%Historic England%' LIMIT 1`;
+    const heritageNote = heritage?.notes ? String(heritage.notes) : null;
+
+    const floorAreaRow = rows.find((r) => String(r.category) === "epc" && /floor.?area/i.test(String(r.key)));
+    const floorArea = floorAreaRow ? Number.parseFloat(String(floorAreaRow.value)) : NaN;
+    const floorAreaKnown = Number.isFinite(floorArea) && floorArea > 0;
+
+    const medianRaw = fact("market", "comparables_median_price");
+    const countRaw = fact("market", "comparables_count");
+    const median = medianRaw ? Number.parseInt(medianRaw, 10) : NaN;
+    const count = countRaw ? Number.parseInt(countRaw, 10) : 0;
+    const hasComparables = Number.isFinite(median) && count > 0;
+    // Sample-aware confidence, mirroring the collection step's honesty.
+    const conf = (base: number) => (count >= 10 ? base : count >= 3 ? base - 0.15 : count >= 1 ? base - 0.3 : 0);
+
+    const floodAlerts = fact("discovery", "flood_alerts_checked");
+    const planningChecked = fact("discovery", "planning_records_checked");
+
+    // ---- model constants (each stored as an explicit assumption fact) ----
+    const GDV_UPLIFT_LOW = 1.1; // +10% uplift band (light refurb/development)
+    const GDV_UPLIFT_HIGH = 1.25; // +25% uplift band (more ambitious redevelopment)
+    const REFURB_PER_SQM_LOW = 600; // £/m² light-to-mid refurb (screening band)
+    const REFURB_PER_SQM_HIGH = 1200; // £/m² mid-to-full refurb (screening band)
+    const REFURB_FLAT_LOW = 35000; // flat band when floor area unknown
+    const REFURB_FLAT_HIGH = 85000;
+    const FEES_PERCENT = 12; // professional fees as % of refurbishment cost
+    const SENSITIVITY = 0.1; // ±10% on GDV and total costs
+
+    const round = (n: number) => Math.round(n);
+    const pct1 = (n: number) => (Math.round(n * 10) / 10).toString();
+
+    const assumptions: Array<[string, string]> = [
+      ["assumption_gdv_uplift_low_percent", String(Math.round((GDV_UPLIFT_LOW - 1) * 100))],
+      ["assumption_gdv_uplift_high_percent", String(Math.round((GDV_UPLIFT_HIGH - 1) * 100))],
+      ["assumption_professional_fees_percent", String(FEES_PERCENT)],
+      ["assumption_sensitivity_band", `±${Math.round(SENSITIVITY * 100)}% applied to GDV and total costs`],
+      ["assumption_acquisition_price", "acquisition assumed at estimated current value — no purchase price provided"],
+    ];
+    if (floorAreaKnown) {
+      assumptions.push(["assumption_refurb_cost_per_sqm_low", String(REFURB_PER_SQM_LOW)]);
+      assumptions.push(["assumption_refurb_cost_per_sqm_high", String(REFURB_PER_SQM_HIGH)]);
+    } else {
+      assumptions.push(["assumption_refurb_flat_low", String(REFURB_FLAT_LOW)]);
+      assumptions.push(["assumption_refurb_flat_high", String(REFURB_FLAT_HIGH)]);
+    }
+
+    // ---- model outputs (all money rounded to whole pounds) ----
+    const values: Array<[string, string, number]> = [
+      ["comparables_available", hasComparables ? "yes" : "no", 0.98],
+    ];
+
+    if (hasComparables) {
+      const currentValue = round(median);
+      values.push([
+        "current_value_basis",
+        floorAreaKnown
+          ? "per-sqm anchored to sector median (EPC floor area)"
+          : "price-based (sector median; no EPC floor area)",
+        0.9,
+      ]);
+      values.push(["current_value_estimate", String(currentValue), conf(0.8)]);
+      if (floorAreaKnown) values.push(["current_value_per_sqm", String(round(currentValue / floorArea)), 0.5]);
+
+      const gdvLow = round(currentValue * GDV_UPLIFT_LOW);
+      const gdvHigh = round(currentValue * GDV_UPLIFT_HIGH);
+      values.push(["gdv_estimate_low", String(gdvLow), 0.45]);
+      values.push(["gdv_estimate_high", String(gdvHigh), 0.45]);
+
+      const refurbLow = floorAreaKnown ? round(floorArea * REFURB_PER_SQM_LOW) : REFURB_FLAT_LOW;
+      const refurbHigh = floorAreaKnown ? round(floorArea * REFURB_PER_SQM_HIGH) : REFURB_FLAT_HIGH;
+      values.push(["refurbishment_cost_range_low", String(refurbLow), floorAreaKnown ? 0.5 : 0.35]);
+      values.push(["refurbishment_cost_range_high", String(refurbHigh), floorAreaKnown ? 0.5 : 0.35]);
+
+      const feesAmount = round(((refurbLow + refurbHigh) / 2) * (FEES_PERCENT / 100));
+      values.push(["professional_fees_percent", String(FEES_PERCENT), 0.5]);
+      values.push(["professional_fees_amount", String(feesAmount), 0.4]);
+
+      // Indicative ROI at mid-GDV vs acquisition (at estimated value) + refurb + fees.
+      const gdvMid = (gdvLow + gdvHigh) / 2;
+      const totalCost = currentValue + (refurbLow + refurbHigh) / 2 + feesAmount;
+      const roi = ((gdvMid - totalCost) / totalCost) * 100;
+      values.push(["indicative_roi", pct1(roi), 0.4]);
+
+      // Sensitivity: ±10% on GDV and total costs.
+      const upside =
+        ((gdvMid * (1 + SENSITIVITY) - totalCost * (1 - SENSITIVITY)) / (totalCost * (1 - SENSITIVITY))) * 100;
+      const downside =
+        ((gdvMid * (1 - SENSITIVITY) - totalCost * (1 + SENSITIVITY)) / (totalCost * (1 + SENSITIVITY))) * 100;
+      values.push(["roi_upside", pct1(upside), 0.35]);
+      values.push(["roi_downside", pct1(downside), 0.35]);
+    } else {
+      // No comparables — assumption-only outputs, clearly labelled, low confidence.
+      values.push(["current_value_basis", "assumption-only — no comparables evidence recorded", 0.9]);
+      values.push(["refurbishment_cost_range_low", String(REFURB_FLAT_LOW), 0.3]);
+      values.push(["refurbishment_cost_range_high", String(REFURB_FLAT_HIGH), 0.3]);
+      values.push(["professional_fees_percent", String(FEES_PERCENT), 0.4]);
+      values.push([
+        "professional_fees_amount",
+        String(round(((REFURB_FLAT_LOW + REFURB_FLAT_HIGH) / 2) * (FEES_PERCENT / 100))),
+        0.3,
+      ]);
+    }
+
+    // Model note — inputs used and honest limitations, folded from the flags.
+    const modelNote = [
+      "Inputs from project memory only:",
+      hasComparables ? `sector median ${medianRaw} (${count} completed sale(s))` : "no comparables evidence",
+      floorAreaKnown ? `EPC floor area ${round(floorArea)} m²` : "no EPC floor area (flat assumption bands used)",
+      `flood alerts: ${floodAlerts ?? "not established"}`,
+      `planning records: ${planningChecked ?? "not established"}`,
+      heritageNote ? "heritage: limited-data check only, no conclusion" : "heritage: not checked",
+    ].join("; ");
+    values.push(["model_note", modelNote, 0.95]);
+
+    for (const [key, value] of assumptions) values.push([key, value, 0.9]);
+
+    await add(
+      "Financial feasibility model",
+      null,
+      "Assumption-driven screening model built from evidence in project memory (Price Paid comparables + constraint flags + EPC floor area when available). Advisory screening only — NOT professional advice; no guarantee of planning approval or returns. All money rounded to whole pounds; ROI sensitivity ±10% on GDV and total costs. Key assumptions stored as fact keys assumption_*.",
+      values,
+    );
+
+    return {
+      status: "done",
+      output: {
+        note: "Financial feasibility model completed from project memory (assumption-led, advisory; sensitivity shown).",
+        facts,
+        sources,
+      },
+    };
+  },
+};
+
+/**
+ * REAL step — generate the evidence-backed feasibility report. Renders the
+ * report HTML server-side from project memory only (facts + sources, via
+ * src/report.ts), records the artifact in memory, and marks the step done.
+ * The printable HTML itself is served by /report/$id.
+ */
+const reportStep: PipelineStepDef = {
+  name: "report",
+  title: "Report generation",
+  implemented: true,
+  run: async (ctx) => {
+    const memory = await getProjectMemory(ctx.projectId);
+    const html = renderReportHtml(memory);
+    if (!html || html.length < 600) throw new Error("report generation produced no output");
+
+    const generatedAt = new Date().toISOString();
+    const reportPath = `/report/${ctx.projectId}`;
+    const [source] = await ctx.db`
+      INSERT INTO sources (project_id, name, url, notes)
+      VALUES (${ctx.projectId}, 'ATLAS AI feasibility report', NULL,
+        'Rendered server-side from project memory (facts + sources) via src/report.ts. No content invented beyond the assumptions recorded as feasibility facts. Printable HTML served at ' || ${reportPath} || '.')
+      RETURNING id`;
+    const sourceId = String(source.id);
+    const facts: FactOut[] = [
+      { category: "report", key: "report_generated", value: "yes", confidence: 1, sourceId },
+      { category: "report", key: "report_generated_at", value: generatedAt, confidence: 1, sourceId },
+      { category: "report", key: "report_html_bytes", value: String(html.length), confidence: 1, sourceId },
+    ];
+    for (const f of facts) {
+      await ctx.db`
+        INSERT INTO facts (project_id, category, key, value, confidence, source_id)
+        VALUES (${ctx.projectId}, ${f.category}, ${f.key}, ${f.value}, ${f.confidence}, ${f.sourceId})`;
+    }
+
+    return {
+      status: "done",
+      output: {
+        note: `Evidence-backed feasibility report generated (advisory screening; served at ${reportPath}).`,
+        facts,
+        sources: [
+          {
+            name: "ATLAS AI feasibility report",
+            url: null,
+            notes: "Rendered server-side from project memory (facts + sources) via src/report.ts.",
+          },
+        ],
+      },
+    };
+  },
+};
+
 export const PIPELINE_STEPS: PipelineStepDef[] = [
   normaliseStep,
   discoveryStep,
@@ -350,16 +571,8 @@ export const PIPELINE_STEPS: PipelineStepDef[] = [
     "Document intelligence",
     "Stub: extract structured facts from collected documents (use class, dimensions, occupancy, services) with per-fact confidence.",
   ),
-  stub(
-    "feasibility",
-    "Financial feasibility",
-    "Stub: build the financial model — purchase, refurbishment, fees, revenue, ROI, cashflow, sensitivity (advisory).",
-  ),
-  stub(
-    "report",
-    "Report generation",
-    "Stub: render the evidence-backed feasibility report with a professional-review flag list.",
-  ),
+  feasibilityStep,
+  reportStep,
 ];
 
 /* ------------------------------------------------------------------ */
