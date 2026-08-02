@@ -37,6 +37,43 @@ describe("buildRenderPrompts", () => {
       expect(result.prompt.startsWith("Photorealistic architectural visualization")).toBe(true);
     }
   });
+
+  test("design-aware prompts describe the DESIGNED layout and stay privacy-safe", () => {
+    // Project with NO source documents: only an address fact exists, so the
+    // spatial evidence brief is empty — the designed conversion context must
+    // carry the render brief instead of falling back to generic imagery.
+    const prompts = buildRenderPrompts(
+      [{ key: "address", value: "78 Godson Road, Croydon CR0 2TA", confidence: 1 }],
+      "gym",
+      { programmeLabel: "Gym / studio", zoneNames: ["Studio floor", "Changing", "Office", "Store"], rooms: ["OPEN PLAN"], allocatedM2: 32 },
+    );
+    expect(prompts.map((p) => p.view)).toEqual(["exterior", "interior"]);
+    for (const result of prompts) {
+      const count = result.prompt.trim().split(/\s+/).length;
+      expect(count).toBeGreaterThanOrEqual(80);
+      expect(count).toBeLessThanOrEqual(180);
+      // No personal/property identity anywhere in the prompts.
+      expect(result.prompt).not.toContain("Godson");
+      expect(result.prompt).not.toContain("Croydon");
+      expect(result.prompt).not.toContain("CR0");
+      expect(result.prompt).not.toContain("78");
+      // The designed programme + zones drive the brief.
+      expect(result.prompt).toContain("Gym / studio");
+      expect(result.prompt).toContain("Studio floor");
+      expect(result.prompt).toContain("Changing");
+    }
+    const interior = prompts.find((p) => p.view === "interior")!;
+    expect(interior.prompt).toContain("designed layout");
+    expect(interior.prompt).toContain("listed zones");
+    // Changing the designed layout must change the cache hash so renders regenerate.
+    const different = buildRenderPrompts(
+      [{ key: "address", value: "78 Godson Road, Croydon CR0 2TA", confidence: 1 }],
+      "gym",
+      { programmeLabel: "Gym / studio", zoneNames: ["Cardio zone", "Free-weights area"], rooms: ["OPEN PLAN"], allocatedM2: 40 },
+    );
+    expect(different[0].hash).not.toBe(prompts[0].hash);
+    expect(different[1].hash).not.toBe(prompts[1].hash);
+  });
 });
 
 describe("requestImage", () => {

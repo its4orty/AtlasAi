@@ -344,7 +344,7 @@ function twinSection(facts: MemoryFact[]): string {
 
   if (status === "no-space-evidence") {
     return `<section>
-      <h2><span class="num">5</span>Existing layout (digital twin)</h2>
+      <h2><span class="num">6</span>Existing layout (digital twin)</h2>
       <div class="flag warn">No space evidence in project memory — the as-built model could not be generated. Upload a floor plan or EPC (or enable the EPC register lookup), then re-run the analysis.</div>
       ${coverage ? `<p class="note">${esc(coverage)}</p>` : ""}
     </section>`;
@@ -368,7 +368,7 @@ function twinSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">5</span>Existing layout (digital twin)</h2>
+    <h2><span class="num">6</span>Existing layout (digital twin)</h2>
     <p class="lede">The current ("as-built") layout of the property, generated from the confidence-scored space facts in project memory. This is the "before" to the concept design's "after" — it is <strong>indicative, not a surveyed plan</strong>, and it never invents rooms or dimensions that are not in the evidence.</p>
     ${totalArea ? `<p class="note">Total floor area: ${esc(totalArea)} m².</p>` : ""}
     ${svg ? `<div class="twin-svg"><p class="note"><strong>Existing layout — 2D plan</strong></p>${svg}</div>` : ""}
@@ -379,6 +379,29 @@ function twinSection(facts: MemoryFact[]): string {
   </section>`;
 }
 
+/**
+ * Section 5 — current property, real Google Street View imagery. Rendered only
+ * when the design step recorded street-view facts. This is REAL photography
+ * (Google), never labelled as AI; the pin is approximate and the caption says so.
+ */
+function streetViewSection(facts: MemoryFact[]): string {
+  const m = factMap(facts);
+  const imagery = m.get("imagery") ?? new Map();
+  const embedUrl = imagery.get("imagery_streetview_embed_url")?.value ?? null;
+  const imgUrl = imagery.get("imagery_streetview_url")?.value ?? null;
+  if (!embedUrl && !imgUrl) return "";
+  const lat = imagery.get("imagery_streetview_lat")?.value ?? null;
+  const lon = imagery.get("imagery_streetview_lon")?.value ?? null;
+  const view = imgUrl
+    ? `<figure class="sv"><img src="${esc(imgUrl)}" alt="Google Street View of the current property (real photograph)"/><figcaption>Google Street View (static image) — <strong>real photograph from Google, not AI-generated</strong>. Approximate location${lat && lon ? ` (${esc(lat)}, ${esc(lon)})` : ""}; verify at the property.</figcaption></figure>`
+    : `<figure class="sv"><iframe src="${esc(embedUrl)}" width="100%" height="420" style="border:0" loading="lazy" allowfullscreen referrerpolicy="no-referrer-when-downgrade" title="Google Street View of the current property"></iframe><figcaption>Google Street View — <strong>real imagery from Google, not AI-generated</strong>. Approximate location${lat && lon ? ` (${esc(lat)}, ${esc(lon)})` : ""}; verify at the property.</figcaption></figure>`;
+  return `<section>
+    <h2><span class="num">5</span>Current property — Google Street View</h2>
+    <p class="lede">A real street-level view of the property's current frontage, embedded from Google Street View. This is a photograph — the AI concept visualisations of the conversion appear later in this report.</p>
+    ${view}
+    <p class="note caveat">Approximate location; verify at the property. Street View imagery may be out of date, and the property may not be visible if it has no street-facing frontage.</p>
+  </section>`;
+}
 /**
  * Section 6 — concept design ("convert to X"). Rendered only when the design
  * step has run for this project (design facts exist in memory). The SVG is
@@ -437,7 +460,7 @@ function designSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">6</span>Concept design — convert to ${esc(programLabel)}</h2>
+    <h2><span class="num">7</span>Concept design — convert to ${esc(programLabel)}</h2>
     <p class="lede">An indicative zoning concept generated from the space facts in project memory (room dimensions, labels, floor area). It is a screening sketch — <strong>not a professional design, not for construction</strong>, and no planning or statutory compliance has been checked.</p>
     ${totalArea ? `<p class="note">Floor area used: ${esc(totalArea)} m² · allocated to zones: ${esc(allocated ?? "—")} m² · circulation: ${esc(circulation ?? "—")}%${generatedAt ? ` · generated ${fmtDate(generatedAt.slice(0, 10))}` : ""}.</p>` : ""}
     ${svg ? `<div class="design-svg"><p class="note"><strong>Concept design — 2D plan</strong></p>${svg}</div>` : ""}
@@ -462,7 +485,7 @@ function confidenceSection(facts: MemoryFact[]): string {
     .sort((a, b) => a.confidence - b.confidence);
   if (low.length === 0) {
     return `<section>
-      <h2><span class="num">7</span>Confidence summary</h2>
+      <h2><span class="num">8</span>Confidence summary</h2>
       <p class="lede">No extracted fact carries confidence below 80% — good evidence coverage for this project.</p>
     </section>`;
   }
@@ -471,7 +494,7 @@ function confidenceSection(facts: MemoryFact[]): string {
       `<tr><td class="strong">${esc(f.key)}</td><td>${esc(f.category)}</td><td>${esc(f.value.slice(0, 80))}${f.value.length > 80 ? "…" : ""}</td><td>${confPct(f.confidence)}</td><td class="src">${esc(f.source_name ?? "inferred")}</td></tr>`,
   );
   return `<section>
-    <h2><span class="num">7</span>Confidence summary — needs review</h2>
+    <h2><span class="num">8</span>Confidence summary — needs review</h2>
     <p class="lede">Every fact below carries confidence below 80% and should be treated as needing review before reliance. This includes all assumption-led financial outputs by design.</p>
     <table class="ev">
       <thead><tr><th>Fact</th><th>Category</th><th>Value</th><th>Confidence</th><th>Source</th></tr></thead>
@@ -503,7 +526,7 @@ function reviewSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">8</span>Items requiring professional review</h2>
+    <h2><span class="num">9</span>Items requiring professional review</h2>
     <ul class="review">
       ${items.map((i) => `<li>${i}</li>`).join("")}
       ${items.length === 0 ? "<li>No outstanding professional-review items were identified from the evidence recorded.</li>" : ""}
@@ -561,6 +584,10 @@ ul.review li:before{content:"!";position:absolute;left:14px;top:9px;color:var(--
 /* Concept design */
 .design-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
 .design-svg svg, .imagery img{width:100%;height:auto;display:block}
+/* Imagery figures (AI concept renders + real Street View) */
+.imagery figure, figure.sv{margin:14px 0;background:#fff;border:1px solid var(--line);padding:10px}
+.imagery figcaption, figure.sv figcaption{font-size:11.5px;color:var(--slate);margin:8px 2px 2px}
+figure.sv iframe{display:block}
 /* Digital twin (as-built) */
 .twin-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
 .twin-svg svg{width:100%;height:auto;display:block}
@@ -643,6 +670,7 @@ export function renderReportHtml(memory: ProjectMemoryLike): string {
     marketSection(facts),
     constraintsSection(facts, sources),
     financialSection(facts),
+    streetViewSection(facts),
     twinSection(facts),
     designSection(facts),
     confidenceSection(facts),
