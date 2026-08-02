@@ -528,8 +528,10 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       SELECT category, key, value FROM facts WHERE project_id = ${projectId}`;
     const factsAll = rows.map((r) => ({ category: String(r.category), key: String(r.key), value: String(r.value) }));
     const intel = factsAll.filter((f) => f.category === "intelligence");
-
-    const areaFact = intel.find((f) => f.key === "total_floor_area_m2");
+    // Floor area: uploaded-document evidence wins; the EPC register fact
+    // (auto-fetched in discovery) is the fallback so register-backed projects
+    // still get a scaled concept sketch.
+    const areaFact = intel.find((f) => f.key === "total_floor_area_m2") ?? factsAll.find((f) => f.category === "epc" && f.key === "total_floor_area_m2");
     const ceilingFact = intel.find((f) => f.key === "ceiling_height_m");
     let rooms = buildRooms(intel);
     if (rooms.length === 0 && areaFact && Number.parseFloat(areaFact.value) > 0) {
