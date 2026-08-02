@@ -232,7 +232,7 @@ export interface ConceptDesign {
 }
 
 /** Parse "4.5 x 3.2" → {width, height}. Returns null when malformed. */
-function parseDim(value: string): { width: number; height: number } | null {
+export function parseDim(value: string): { width: number; height: number } | null {
   const m = value.match(/([\d.]+)\s*[x×]\s*([\d.]+)/);
   if (!m) return null;
   const a = Number.parseFloat(m[1]);
