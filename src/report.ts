@@ -408,6 +408,7 @@ function designSection(facts: MemoryFact[]): string {
   const allocated = d.get("design_allocated_m2")?.value;
   const circulation = d.get("design_circulation_pct")?.value;
   const assumptions = d.get("design_assumptions")?.value;
+  const imagery = ["exterior", "interior"].map(view => ({ view, url: d.get(`imagery_${view}_url`)?.value, status: d.get(`imagery_${view}_status`)?.value, provider: d.get(`imagery_${view}_provider`)?.value, model: d.get(`imagery_${view}_model`)?.value })).filter(x => x.url && x.status === "generated");
 
   let zonesHtml = "";
   const zonesRaw = d.get("design_zones")?.value;
@@ -441,6 +442,7 @@ function designSection(facts: MemoryFact[]): string {
     ${axoSvg ? `<div class="design-svg"><p class="note"><strong>3D-style view (indicative, not photorealistic)</strong></p>${axoSvg}<p class="note caveat">Schematic extrusion from the same project-memory room evidence, not a surveyed or photorealistic render. This concept remains indicative and not for construction.</p></div>` : ""}
     ${zonesHtml ? `<h3 class="sub">Proposed zones</h3>${zonesHtml}` : ""}
     ${assumptions ? `<p class="note caveat">${esc(assumptions)}</p>` : ""}
+    ${imagery.length ? `<div class="imagery"><h3 class="sub">Photorealistic concept visualisations</h3>${imagery.map(i => `<figure><img src="${esc(i.url)}" alt="AI-generated ${i.view} concept visualisation"/><figcaption>AI-generated concept visualisation — not a photograph of the property. ${esc(i.view)} view; provider ${esc(i.provider ?? "unknown")}, model ${esc(i.model ?? "unknown")}.</figcaption></figure>`).join("")}<p class="note caveat">Images are generated from the project's confidence-scored spatial brief and target use; they are illustrative concepts, not surveyed or verified photography.</p></div>` : ""}
     ${complianceBlock(compliance)}
   </section>`;
 }
@@ -556,7 +558,7 @@ ul.review li:first-child{border-top:1px solid var(--line)}
 ul.review li:before{content:"!";position:absolute;left:14px;top:9px;color:var(--copper);font:700 15px Manrope}
 /* Concept design */
 .design-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
-.design-svg svg{width:100%;height:auto;display:block}
+.design-svg svg, .imagery img{width:100%;height:auto;display:block}
 /* Digital twin (as-built) */
 .twin-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
 .twin-svg svg{width:100%;height:auto;display:block}

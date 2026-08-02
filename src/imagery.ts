@@ -1,0 +1,47 @@
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+export interface SpatialFact { key: string; value: string; confidence?: number; }
+export interface RenderPrompt { view: "exterior" | "interior"; prompt: string; hash: string; }
+export interface ImageResult { bytes: Uint8Array; mime: string; provider: string; model: string; }
+const VERSION = "imagery-prompt-v1";
+const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
+function spatialBrief(facts: SpatialFact[]): string {
+  const allowed = facts.filter(f => (f.confidence ?? 1) >= 0.8 && /room|dimension|area|floor|ceiling|layout|use_class/i.test(f.key));
+  return allowed.map(f => `${f.key.replace(/_/g, " ")}: ${f.value}`).join("; ").slice(0, 900) || "an indicative commercial interior with an open layout";
+}
+export function buildRenderPrompts(facts: SpatialFact[], targetUse: string): RenderPrompt[] {
+  const brief = spatialBrief(facts);
+  const common = `Target use: ${targetUse}. Spatial brief from evidence: ${brief}. Dimensions not marked high confidence are approximate; do not invent measured facts.`;
+  const exterior = `Photorealistic architectural visualization, exterior concept visualisation not a photograph. ${common} Show a plausible street-facing commercial premises adapted for the target use, with a welcoming entrance and restrained contemporary materials. Use a natural eye-level three-quarter viewpoint, realistic daylight, accurate architectural scale, subtle weathering and soft shadows. Include a calm, coherent composition and realistic lens perspective. Keep the frontage generic and do not identify a real property. No people, no text, no logos, no signage lettering, no personal data. Concept visualisation not a photograph.`;
+  const interior = `Photorealistic architectural visualization, interior concept visualisation not a photograph. ${common} Show the proposed target-use interior with the recorded room arrangement represented honestly, clear accessible circulation between zones, and only generic finishes such as timber, painted plaster, glass and durable flooring. Use a wide-angle eye-level viewpoint, realistic daylight supplemented by warm practical lighting, natural material texture and believable construction. Include a calm, coherent composition and realistic lens perspective. Do not add measured rooms or dimensions absent from the brief. No people, no text, no logos, no personal data. Concept visualisation not a photograph.`;
+  return [{ view: "exterior", prompt: exterior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|exterior`).digest("hex") }, { view: "interior", prompt: interior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|interior`).digest("hex") }].filter(p => words(p.prompt) >= 80 && words(p.prompt) <= 180);
+}
+// Network calls are bounded so a provider outage does not block the design step.
+async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> { return fetch(url, { ...init, signal: AbortSignal.timeout(ms) }); }
+export async function requestImage(prompt: string, view: string): Promise<ImageResult | null> {
+  const token = process.env.CLOUDFLARE_API_TOKEN?.trim(); const account = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+  if (!token || !account || token.startsWith("your-")) return null;
+  const model = process.env.IMAGE_MODEL?.trim() || "@cf/black-forest-labs/FLUX.1-schnell";
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/run/${encodeURIComponent(model)}`;
+  try {
+    const res = await fetchWithTimeout(endpoint, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ prompt }) }, 90000);
+    if (!res.ok) throw new Error(`Cloudflare HTTP ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!bytes.length) throw new Error("empty image");
+    return { bytes, mime: res.headers.get("content-type")?.split(";")[0] || "image/png", provider: "cloudflare", model };
+  } catch { /* fall through to the free Pollinations fallback */ }
+  try {
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&model=flux&nologo=true`;
+    const res = await fetchWithTimeout(url, {}, 120000); if (!res.ok) return null;
+    const bytes = new Uint8Array(await res.arrayBuffer()); if (!bytes.length) return null;
+    return { bytes, mime: res.headers.get("content-type")?.split(";")[0] || "image/jpeg", provider: "pollinations", model: "flux" };
+  } catch { return null; }
+}
+export async function saveRender(projectId: string, view: string, result: ImageResult): Promise<string> {
+  const ext = result.mime.includes("webp") ? "webp" : result.mime.includes("jpeg") ? "jpg" : "png";
+  const dir = path.join(process.cwd(), "public", "project-images", String(projectId)); await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, `${view}.${ext}`), result.bytes); return `/project-images/${projectId}/${view}.${ext}`;
+}
+export { VERSION as imageryPromptVersion };
