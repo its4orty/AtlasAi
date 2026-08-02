@@ -19,6 +19,35 @@ const PORT = 3000;
 const HOST = "0.0.0.0";
 const CLIENT_DIR = `${import.meta.dir}/dist/client`;
 
+// Explicit MIME types for static files. `new Response(BunFile)` does not reliably
+// set Content-Type, and browsers will not render an image (or strict-load a
+// module script) without it.
+const STATIC_MIME: Record<string, string> = {
+  html: "text/html; charset=utf-8",
+  css: "text/css; charset=utf-8",
+  js: "text/javascript; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8",
+  json: "application/json; charset=utf-8",
+  map: "application/json",
+  svg: "image/svg+xml",
+  webp: "image/webp",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  ico: "image/x-icon",
+  avif: "image/avif",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  txt: "text/plain; charset=utf-8",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  wasm: "application/wasm",
+  pdf: "application/pdf",
+};
+
 // Free PORT regardless of which user owns the current listener. lsof runs under
 // sudo so it can see (and the kill can signal) a process owned by another user;
 // the loop waits for the socket to actually release before we bind.
@@ -43,7 +72,15 @@ for (let attempt = 1; ; attempt++) {
         const { pathname } = new URL(req.url);
         if (pathname !== "/") {
           const file = Bun.file(CLIENT_DIR + pathname);
-          if (await file.exists()) return new Response(file);
+          if (await file.exists()) {
+            // Explicit Content-Type: `new Response(BunFile)` does not reliably
+            // emit one, and browsers refuse to render images without a MIME type.
+            const ext = pathname.split(".").pop()?.toLowerCase() ?? "";
+            const mime =
+              (STATIC_MIME as Record<string, string>)[ext] ??
+              "application/octet-stream";
+            return new Response(file, { headers: { "Content-Type": mime } });
+          }
         }
         return (
           handler as { fetch: (r: Request) => Response | Promise<Response> }
