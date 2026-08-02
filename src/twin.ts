@@ -1,6 +1,7 @@
 import { sql } from "~/db";
 import { ensureSchema } from "~/project-schema";
 import { parseDim } from "~/design";
+import { renderAxonometric } from "~/axo";
 
 /**
  * ATLAS AI — Phase 1 "digital twin": an as-built spatial model of the EXISTING
@@ -71,6 +72,7 @@ export interface DigitalTwin {
   layoutDescription: string;
   dataCoverage: string;
   svg: string;
+  axoSvg: string;
   generatedAt: string;
 }
 
@@ -317,6 +319,7 @@ export function buildTwin(factRows: TwinFactLike[], address: string): DigitalTwi
       layoutDescription: layoutDescription(fpRooms, totalAreaM2, true),
       dataCoverage: dataCoverageNote(fpRooms, totalAreaM2, true, coverageFacts),
       svg: renderTwinSvg({ address, rooms: fpRooms, footprintOnly: true, totalAreaM2, generatedAt }),
+      axoSvg: renderAxonometric({ title: "EXISTING LAYOUT (AS-BUILT)", address, rooms: fpRooms, footprintOnly: true, generatedAt }),
       generatedAt,
     };
   }
@@ -347,6 +350,7 @@ export function buildTwin(factRows: TwinFactLike[], address: string): DigitalTwi
     layoutDescription: layoutDescription(rooms, totalAreaM2, false),
     dataCoverage: dataCoverageNote(rooms, totalAreaM2, false, coverageFacts),
     svg: renderTwinSvg({ address, rooms, footprintOnly: false, totalAreaM2, generatedAt }),
+    axoSvg: renderAxonometric({ title: "EXISTING LAYOUT (AS-BUILT)", address, rooms, generatedAt }),
     generatedAt,
   };
 }
@@ -412,6 +416,7 @@ export async function runTwinStep(db: Db, projectId: string): Promise<TwinStepOu
     factOuts.push(
       { category: "twin", key: "twin_status", value: "generated", confidence: 1, sourceId },
       { category: "twin", key: "twin_floor_plan_svg", value: twin.svg, confidence: 0.5, sourceId },
+      { category: "twin", key: "twin_floor_plan_axo_svg", value: twin.axoSvg, confidence: 0.5, sourceId },
       { category: "twin", key: "twin_layout_description", value: twin.layoutDescription, confidence: twin.footprintOnly ? 0.7 : 0.6, sourceId },
       { category: "twin", key: "twin_data_coverage", value: twin.dataCoverage, confidence: 0.95, sourceId },
       {
