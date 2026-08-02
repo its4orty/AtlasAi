@@ -54,3 +54,15 @@ table.facts tr:last-child td{border-bottom:0}
   .nav-links{gap:12px 18px;flex-wrap:wrap;justify-content:flex-end}
 }
 .text-button{border:0;background:none;color:var(--copper);font:700 12px Manrope;text-decoration:underline;cursor:pointer;padding:0}.text-button:disabled{opacity:.6;cursor:wait}.evidence-form input{font:13px Manrope;padding:12px;min-width:0}.evidence-form button{padding:0 16px}
+/* Barber shop demo concept imagery */
+.hero-visual-note{position:absolute;z-index:2;right:24px;bottom:20px;margin:0;color:#f4f0e8cc;font:700 10px Manrope;letter-spacing:.1em;text-transform:uppercase}
+.demo-story{background:var(--limestone);padding:120px 0 110px}
+.demo-layout{display:grid;grid-template-columns: minmax(280px,.72fr) minmax(0,1.28fr);gap:70px;align-items:center}
+.demo-layout .section-intro>p:last-of-type{color:var(--slate);margin-top:22px}
+.concept-note{font-size:12px!important;border-left:2px solid var(--copper);padding-left:14px}
+.demo-diptych,.concept-gallery figure{margin:0}
+.demo-diptych img,.concept-gallery img{display:block;width:100%;height:auto;aspect-ratio:3/2;object-fit:cover}
+.demo-diptych figcaption,.concept-gallery figcaption{border-top:1px solid #c8c1b5;padding-top:14px;margin-top:14px;font-size:13px;line-height:1.5;color:var(--slate)}
+.demo-diptych figcaption span,.concept-gallery figcaption span{display:block;color:var(--copper);font-size:10px;font-weight:700;letter-spacing:.12em;margin-bottom:7px}
+.concept-gallery{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:55px}
+@media(max-width:800px){.hero-visual-note{left:18px;right:auto;bottom:20px;font-size:9px}.demo-story{padding:80px 0}.demo-layout{grid-template-columns:1fr;gap:40px}.concept-gallery{grid-template-columns:1fr;margin-top:40px}}
