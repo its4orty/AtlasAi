@@ -142,6 +142,23 @@ export async function ensureSchema(): Promise<void> {
   await db`
     CREATE INDEX IF NOT EXISTS idx_price_paid_transfer_date ON price_paid (transfer_date)`;
 
+  // User-uploaded evidence (floor plans, EPCs, planning drawings). Files are
+  // stored on disk; the row records provenance, size and processing status.
+  // The intelligence step consumes these rows to extract space facts.
+  await db`
+    CREATE TABLE IF NOT EXISTS documents (
+      id BIGSERIAL PRIMARY KEY,
+      project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      filename TEXT NOT NULL,
+      path TEXT NOT NULL,
+      mime TEXT,
+      size_bytes INTEGER,
+      status TEXT NOT NULL DEFAULT 'uploaded',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+  await db`
+    CREATE INDEX IF NOT EXISTS idx_documents_project ON documents (project_id)`;
+
   schemaReady = true;
 }
 

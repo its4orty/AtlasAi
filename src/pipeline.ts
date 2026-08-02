@@ -1,6 +1,12 @@
 import { sql } from "~/db";
 import { ensureSchema, toJson, rowsToJson } from "~/project-schema";
 import { renderReportHtml } from "~/report";
+// pdf-parse v1 (CJS, no exports map — vite interop gives a default export).
+// Import the lib entry directly: index.js has an `isDebugMode = !module.parent`
+// block that reads ./test/data/... and crashes the server at startup under
+// Vite's CJS bundling. lib/pdf-parse.js has no such block.
+// eslint-disable-next-line import/default
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 
 /**
  * ATLAS AI — analysis pipeline runner (Phase 1).
@@ -15,7 +21,8 @@ import { renderReportHtml } from "~/report";
  *   1. normalise     — REAL: address normalisation & validation (local only)
  *   2. discovery     — REAL: find public sources for the address
  *   3. collection    — REAL: comparables evidence from the local Price Paid index
- *   4. intelligence  — STUB: extract structured facts with confidence scores
+ *   4. intelligence  — REAL: extract structured space facts from uploaded
+ *                      documents (floor plans, EPCs) with per-fact confidence
  *   5. feasibility   — REAL: assumption-led financial feasibility model
  *   6. report        — REAL: evidence-backed feasibility report (server-rendered)
  */
@@ -306,14 +313,15 @@ const collectionStep: PipelineStepDef = {
       );
     }
 
-    // Evidence-assembly summary. PLACEHOLDER: document intake (user-uploaded
-    // PDFs, planning/EPC records fetched by later adapters) is NOT in scope yet
-    // — the count below covers only the evidence items this step assembles,
-    // which today is the comparables evidence recorded above.
+    // Evidence-assembly summary: comparables evidence recorded above plus any
+    // user-uploaded documents available to the intelligence step.
+    const docRows = await ctx.db`
+      SELECT count(*)::int AS n FROM documents WHERE project_id = ${ctx.projectId}`;
+    const evidenceCount = Number(docRows[0]?.n ?? 0);
     await ctx.db`
       INSERT INTO facts (project_id, category, key, value, confidence, source_id)
-      VALUES (${ctx.projectId}, 'collection', 'evidence_items_collected', '0', 1, NULL)`;
-    facts.push({ category: "collection", key: "evidence_items_collected", value: "0", confidence: 1, sourceId: null });
+      VALUES (${ctx.projectId}, 'collection', 'evidence_items_collected', ${String(evidenceCount)}, 1, NULL)`;
+    facts.push({ category: "collection", key: "evidence_items_collected", value: String(evidenceCount), confidence: 1, sourceId: null });
 
     return {
       status: "done",
@@ -562,15 +570,202 @@ const reportStep: PipelineStepDef = {
   },
 };
 
+/* ------------------------------------------------------------------ */
+/* Document intelligence (step 4)                                      */
+/* ------------------------------------------------------------------ */
+/** Extract plain-text from a PDF on disk. Returns "" for scanned pages (no text layer). */
+async function extractPdfText(filePath: string): Promise<string> {
+  try {
+    const bytes = await Bun.file(filePath).arrayBuffer();
+    const data = await pdfParse(Buffer.from(bytes));
+    return typeof data.text === "string" ? data.text : "";
+  } catch {
+    return "";
+  }
+}
+
+interface SpaceFact {
+  key: string;
+  value: string;
+  confidence: number;
+}
+
+const ROOM_LABELS = [
+  "reception", "office", "kitchen", "kitchenette", "wc", "toilet", "bathroom",
+  "shower", "storage", "meeting", "waiting", "lounge", "bedroom", "salon",
+  "shop", "retail", "corridor", "stair", "hall", "lobby", "cafe", "restaurant", "bar",
+];
+
+const OCCUPANCY_HINTS: Array<[RegExp, string]> = [
+  [/accountant/i, "accountants"], [/solicitor/i, "solicitors"],
+  [/estate agent/i, "estate agent"], [/dentist/i, "dental practice"],
+  [/hairdresser|barber/i, "hairdresser/barber"], [/restaurant|bistro|cafe\b/i, "cafe/restaurant"],
+  [/retail|shop\b|store\b/i, "retail"], [/office/i, "office"],
+  [/residential|flat|apartment|dwelling/i, "residential"],
+];
+
+/**
+ * Rule-based extraction of space facts from a document's text layer.
+ * Every fact carries a confidence score; nothing here ever overclaims.
+ * OCR of scanned plans is a later phase (flagged when no text layer).
+ */
+function extractSpaceFacts(text: string, filename: string): SpaceFact[] {
+  const facts: SpaceFact[] = [];
+  const t = text.replace(/\s+/g, " ");
+
+  // Document type (filename first, then content signals).
+  const name = filename.toLowerCase();
+  let docType = "other";
+  if (/(epc|energy performance)/i.test(name) || /energy performance/i.test(t)) docType = "epc";
+  else if (/(floor\s*plan|floorplan|layout|drawing)/i.test(name)) docType = "floor plan";
+  else if (/planning/i.test(name)) docType = "planning document";
+  else if (/(title|register)/i.test(name)) docType = "title document";
+  facts.push({ key: "document_type", value: docType, confidence: 0.75 });
+
+  // Floor areas (m² patterns, then sq ft converted to m²).
+  const areaPatterns: Array<[RegExp, string]> = [
+    [/total\s+floor\s+area[:\s]*([\d,]+(?:\.\d+)?)\s*(?:m2|m²|sq\s*m|sqm)/i, "total_floor_area_m2"],
+    [/gross\s+internal\s+area[:\s]*([\d,]+(?:\.\d+)?)\s*(?:m2|m²|sq\s*m|sqm)/i, "gia_m2"],
+    [/gross\s+external\s+area[:\s]*([\d,]+(?:\.\d+)?)\s*(?:m2|m²|sq\s*m|sqm)/i, "gea_m2"],
+  ];
+  for (const [re, key] of areaPatterns) {
+    const m = t.match(re);
+    if (m) facts.push({ key, value: String(parseFloat(m[1].replace(/,/g, ""))), confidence: 0.8 });
+  }
+  const sqft = t.match(/([\d,]+(?:\.\d+)?)\s*(?:sq\s*ft|ft2|square\s*feet)/i);
+  if (sqft) {
+    const m2 = Math.round(parseFloat(sqft[1].replace(/,/g, "")) * 0.092903 * 10) / 10;
+    facts.push({ key: "total_floor_area_m2", value: String(m2), confidence: 0.7 });
+  }
+
+  // Room dimensions: "4.5m x 3.2m" and "12' x 10'" styles.
+  const mRe = /([\d.]+)\s*m\s*[x×]\s*([\d.]+)\s*m/gi;
+  let mm: RegExpExecArray | null;
+  while ((mm = mRe.exec(t)) !== null) {
+    facts.push({ key: "room_dimension_m", value: `${mm[1]} x ${mm[2]}`, confidence: 0.8 });
+  }
+  const ftRe = /(\d+(?:\.\d+)?)'\s*[x×]\s*(\d+(?:\.\d+)?)'(?!\s*m)/gi;
+  let fm: RegExpExecArray | null;
+  while ((fm = ftRe.exec(t)) !== null) {
+    facts.push({ key: "room_dimension_ft", value: `${fm[1]}' x ${fm[2]}'`, confidence: 0.7 });
+  }
+
+  // Room labels by keyword.
+  for (const label of ROOM_LABELS) {
+    if (new RegExp(`\\b${label}\\b`, "i").test(t)) {
+      facts.push({ key: "room_label", value: label, confidence: 0.55 });
+    }
+  }
+
+  // Use class, ceiling height, EPC rating/RRN, dates, stated amounts.
+  const uc = t.match(/use\s+class[:\s]*([A-Za-z]\d?)/i);
+  if (uc) facts.push({ key: "use_class", value: uc[1].toUpperCase(), confidence: 0.85 });
+  const ch = t.match(/ceiling\s+height[:\s]*([\d.]+)\s*m/i);
+  if (ch) facts.push({ key: "ceiling_height_m", value: ch[1], confidence: 0.8 });
+  const rating = t.match(/(?:current|energy)\s+rating[:\s]*([A-G])\b/i);
+  if (rating) facts.push({ key: "epc_rating", value: rating[1].toUpperCase(), confidence: 0.85 });
+  const rrn = t.match(/\b(\d{4}-\d{4}-\d{4}-\d{4}-\d{4})\b/);
+  if (rrn) facts.push({ key: "epc_rrn", value: rrn[1], confidence: 0.9 });
+  const dt = t.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/);
+  if (dt) facts.push({ key: "document_date", value: dt[1], confidence: 0.8 });
+  const amt = t.match(/£\s*([\d,]+(?:\.\d+)?)/);
+  if (amt) facts.push({ key: "stated_amount_gbp", value: amt[1].replace(/,/g, ""), confidence: 0.8 });
+
+  // Current use / occupancy (first strong hint wins).
+  for (const [re, label] of OCCUPANCY_HINTS) {
+    if (re.test(t)) {
+      facts.push({ key: "current_use", value: label, confidence: 0.6 });
+      break;
+    }
+  }
+
+  return facts;
+}
+
+const intelligenceStep: PipelineStepDef = {
+  name: "intelligence",
+  title: "Document intelligence",
+  implemented: true,
+  run: async (ctx) => {
+    const { db, projectId } = ctx;
+    const sources: SourceOut[] = [];
+    const facts: FactOut[] = [];
+    const docs = await db`
+      SELECT id, filename, path FROM documents WHERE project_id = ${projectId} ORDER BY id`;
+    if (docs.length === 0) {
+      const [src] = await db`
+        INSERT INTO sources (project_id, name, url, notes)
+        VALUES (${projectId}, 'document intake', NULL,
+          'No documents uploaded. Upload a floor plan or EPC via POST /api/documents, then re-run the analysis to extract space facts.')
+        RETURNING id`;
+      await db`
+        INSERT INTO facts (project_id, category, key, value, confidence, source_id)
+        VALUES (${projectId}, 'intelligence', 'documents_processed', '0', 1, ${src.id})`;
+      return {
+        status: "done",
+        output: { note: "no documents uploaded — nothing to extract", facts, sources },
+      };
+    }
+    let processed = 0;
+    for (const doc of docs) {
+      const path = String(doc.path);
+      const filename = String(doc.filename);
+      const text = await extractPdfText(path);
+      if (text.trim().length < 10) {
+        await db`
+          UPDATE documents SET status = 'no-text-layer' WHERE id = ${doc.id}`;
+        await db`
+          INSERT INTO sources (project_id, name, url, notes)
+          VALUES (${projectId}, ${filename}, NULL,
+            'Uploaded but has no extractable text layer (scanned image?). OCR is a later phase.')
+          RETURNING id`;
+        continue;
+      }
+      const extracted = extractSpaceFacts(text, filename);
+      const [src] = await db`
+        INSERT INTO sources (project_id, name, url, notes)
+        VALUES (${projectId}, ${filename}, NULL,
+          'Uploaded document; rule-based text extraction with per-fact confidence scores (OCR of scanned plans is a later phase).')
+        RETURNING id`;
+      const sourceId = String(src.id);
+      sources.push({ name: filename, url: null, notes: "uploaded document" });
+      for (const f of extracted) {
+        await db`
+          INSERT INTO facts (project_id, category, key, value, confidence, source_id)
+          VALUES (${projectId}, 'intelligence', ${f.key}, ${f.value}, ${f.confidence}, ${sourceId})`;
+        facts.push({
+          category: "intelligence",
+          key: f.key,
+          value: f.value,
+          confidence: f.confidence,
+          sourceId,
+        });
+      }
+      await db`UPDATE documents SET status = 'extracted' WHERE id = ${doc.id}`;
+      processed += 1;
+    }
+    await db`
+      INSERT INTO facts (project_id, category, key, value, confidence, source_id)
+      VALUES (${projectId}, 'intelligence', 'documents_processed', ${String(processed)}, 1, NULL)`;
+    facts.push({
+      category: "intelligence",
+      key: "documents_processed",
+      value: String(processed),
+      confidence: 1,
+      sourceId: null,
+    });
+    return {
+      status: "done",
+      output: { note: `extracted space facts from ${processed} uploaded document(s)`, facts, sources },
+    };
+  },
+};
+
 export const PIPELINE_STEPS: PipelineStepDef[] = [
   normaliseStep,
   discoveryStep,
   collectionStep,
-  stub(
-    "intelligence",
-    "Document intelligence",
-    "Stub: extract structured facts from collected documents (use class, dimensions, occupancy, services) with per-fact confidence.",
-  ),
+  intelligenceStep,
   feasibilityStep,
   reportStep,
 ];
@@ -605,14 +800,23 @@ async function runStep(db: Db, projectId: string, step: PipelineStepDef, address
  * step's status into project memory. Returns the project id, its final status
  * and the ordered step statuses — enough for the /analyse page to render.
  */
-export async function runPipeline(address: string) {
+export async function runPipeline(address: string, existingProjectId?: string) {
   const db = sql();
   await ensureSchema();
 
-  const [project] = await db`
-    INSERT INTO projects (address, status) VALUES (${address}, 'running')
-    RETURNING id, address, status`;
-  const projectId = String(project.id);
+  let projectId: string;
+  if (existingProjectId) {
+    // Re-run on an existing project (e.g. after uploading documents) so the
+    // intelligence step can consume the new evidence. Steps append new
+    // pipeline_runs rows; facts/sources accumulate in project memory.
+    projectId = existingProjectId;
+    await db`UPDATE projects SET status = 'running', updated_at = NOW() WHERE id = ${projectId}`;
+  } else {
+    const [project] = await db`
+      INSERT INTO projects (address, status) VALUES (${address}, 'running')
+      RETURNING id, address, status`;
+    projectId = String(project.id);
+  }
 
   let projectStatus = "complete";
   try {
