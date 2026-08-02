@@ -47,8 +47,23 @@ describe("requestImage", () => {
 
     const result = await requestImage("a safe prompt", "exterior");
     expect(result).not.toBeNull();
-    expect(result).toMatchObject({ provider: "cloudflare", model: "@cf/black-forest-labs/FLUX.1-schnell", mime: "image/webp" });
+    expect(result).toMatchObject({ provider: "cloudflare", model: "@cf/black-forest-labs/flux-1-schnell", mime: "image/webp" });
     expect([...result!.bytes]).toEqual([7, 8]);
+  });
+
+  test("decodes Cloudflare base64 JSON image responses", async () => {
+    process.env.CLOUDFLARE_API_TOKEN = "test-token";
+    process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
+    const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
+    const encoded = btoa(String.fromCharCode(...jpeg));
+    globalThis.fetch = async () => new Response(JSON.stringify({ result: { image: encoded } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+    const result = await requestImage("a safe prompt", "exterior");
+    expect(result).toMatchObject({ provider: "cloudflare", model: "@cf/black-forest-labs/flux-1-schnell", mime: "image/jpeg" });
+    expect([...result!.bytes]).toEqual([...jpeg]);
   });
 
   test("falls back to Pollinations after Cloudflare failure", async () => {
