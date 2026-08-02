@@ -1,6 +1,7 @@
 import { sql } from "~/db";
 import { ensureSchema, toJson, rowsToJson } from "~/project-schema";
 import { renderReportHtml } from "~/report";
+import { runDesignStep } from "~/design";
 import { runTwinStep } from "~/twin";
 // pdf-parse v1 (CJS, no exports map — vite interop gives a default export).
 // Import the lib entry directly: index.js has an `isDebugMode = !module.parent`
