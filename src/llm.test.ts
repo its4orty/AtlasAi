@@ -137,3 +137,29 @@ describe("designInputHash", () => {
     expect(designInputHash(other)).not.toBe(designInputHash(input));
   });
 });
+
+describe("OpenAI-compatible provider", () => {
+  const openAiResponse = (content: string, status = 200) => Response.json(status === 200 ? { choices: [{ message: { content } }] } : { error: { message: "unsupported response format" } }, { status });
+  afterEach(() => { delete process.env.LLM_PROVIDER; delete process.env.LLM_API_KEY; delete process.env.LLM_BASE_URL; delete process.env.LLM_MODEL; });
+
+  test("happy path parses choices message content", async () => {
+    process.env.LLM_PROVIDER = "openai"; process.env.LLM_API_KEY = "test-key"; process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1"; process.env.LLM_MODEL = "llama-test";
+    const original = globalThis.fetch; const calls: unknown[] = [];
+    globalThis.fetch = (async (url, init) => { calls.push(JSON.parse(String(init?.body))); expect(String(url)).toBe("https://api.groq.com/openai/v1/chat/completions"); return openAiResponse(JSON.stringify(validDesign)); }) as typeof fetch;
+    try { expect(await requestGemini(input)).toEqual(validDesign); expect(calls).toHaveLength(1); } finally { globalThis.fetch = original; }
+  });
+
+  test("strict schema 400 retries with json_object", async () => {
+    process.env.LLM_PROVIDER = "openai"; process.env.LLM_API_KEY = "test-key"; process.env.LLM_BASE_URL = "https://models.github.ai/inference";
+    const original = globalThis.fetch; const formats: string[] = [];
+    globalThis.fetch = (async (_url, init) => { const body = JSON.parse(String(init?.body)); formats.push(body.response_format.type); return formats.length === 1 ? openAiResponse("", 400) : openAiResponse(JSON.stringify(validDesign)); }) as typeof fetch;
+    try { expect(await requestGemini(input)).toEqual(validDesign); expect(formats).toEqual(["json_schema", "json_object"]); } finally { globalThis.fetch = original; }
+  });
+
+  test("both response formats failing returns null", async () => {
+    process.env.LLM_PROVIDER = "openai"; process.env.LLM_API_KEY = "test-key"; process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1";
+    const original = globalThis.fetch; let calls = 0;
+    globalThis.fetch = (async () => { calls++; return openAiResponse("", 400); }) as typeof fetch;
+    try { expect(await requestGemini(input)).toBeNull(); expect(calls).toBe(4); } finally { globalThis.fetch = original; }
+  });
+});

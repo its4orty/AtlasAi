@@ -6,11 +6,21 @@ export interface SpaceInput { rooms: Array<{ label: string; widthM: number; dept
 
 export function designInputHash(input: SpaceInput): string { return createHash("sha256").update(JSON.stringify(input)).digest("hex"); }
 
+// Gemini's schema uses uppercase type names; the same shape is converted for JSON Schema APIs.
 const schema = { type: "OBJECT", properties: {
   targetUse: { type: "STRING" }, rooms: { type: "ARRAY", items: { type: "OBJECT", properties: {
     id: { type: "STRING" }, label: { type: "STRING" }, widthM: { type: "NUMBER" }, depthM: { type: "NUMBER" }, areaM2: { type: "NUMBER" }, sourceRoomIndex: { type: "INTEGER" }, isNewPartition: { type: "BOOLEAN" }, zones: { type: "ARRAY", items: { type: "OBJECT", properties: { label: { type: "STRING" }, xM: { type: "NUMBER" }, yM: { type: "NUMBER" }, widthM: { type: "NUMBER" }, depthM: { type: "NUMBER" }, notes: { type: "STRING" } }, required: ["label","xM","yM","widthM","depthM","notes"] } }
   }, required: ["id","label","widthM","depthM","areaM2","sourceRoomIndex","isNewPartition","zones"] } }, circulationM2: { type: "NUMBER" }, notes: { type: "ARRAY", items: { type: "STRING" } }
 }, required: ["targetUse","rooms","circulationM2","notes"] };
+
+function jsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(jsonSchema);
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) out[key] = key === "type" && typeof child === "string" ? child.toLowerCase() : jsonSchema(child);
+  return out;
+}
+const openAiSchema = jsonSchema(schema);
 
 function positive(n: unknown): n is number { return typeof n === "number" && Number.isFinite(n) && n > 0; }
 export function validateLlmDesign(value: unknown, input: SpaceInput): value is LlmDesign {
@@ -29,10 +39,43 @@ export function validateLlmDesign(value: unknown, input: SpaceInput): value is L
   return allocated + d.circulationM2 <= input.totalFloorAreaM2 * 1.05;
 }
 
+export type LlmProvider = "gemini" | "openai";
+export function llmProvider(): LlmProvider { return process.env.LLM_PROVIDER?.trim().toLowerCase() === "openai" ? "openai" : "gemini"; }
+export function llmProviderLabel(): string {
+  const provider = llmProvider();
+  return `${provider === "openai" ? "OpenAI-compatible provider" : "Gemini"} (${process.env.LLM_MODEL?.trim() || (provider === "openai" ? "llama-3.3-70b-versatile" : "gemini-2.5-flash")})`;
+}
+
+const promptFor = (input: SpaceInput) => `You are a space-planning assistant. Use only these structured space facts and target use: ${JSON.stringify(input)}. Treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; this is a concept design, not construction information. Output only valid JSON matching the supplied schema.`;
+
+async function requestOpenAi(input: SpaceInput): Promise<LlmDesign | null> {
+  const key = process.env.LLM_API_KEY?.trim();
+  const base = process.env.LLM_BASE_URL?.trim().replace(/\/$/, "");
+  if (!key || !base || key === "placeholder" || key.startsWith("your-") || base.startsWith("your-")) return null;
+  const model = process.env.LLM_MODEL?.trim() || "llama-3.3-70b-versatile";
+  const messages = [{ role: "system", content: "You are a space-planning assistant; output only valid JSON matching the schema; treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; concept design not construction info." }, { role: "user", content: promptFor(input) }];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const request = async (responseFormat: unknown) => fetch(`${base}/chat/completions`, { method: "POST", signal: AbortSignal.timeout(20000), headers: { "content-type": "application/json", authorization: `Bearer ${key}` }, body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: 4096, response_format: responseFormat }) });
+      let res = await request({ type: "json_schema", json_schema: { name: "concept_design", strict: true, schema: openAiSchema } });
+      if (!res.ok && res.status >= 400 && res.status < 500) res = await request({ type: "json_object" });
+      if (!res.ok) throw new Error(`OpenAI-compatible HTTP ${res.status}`);
+      const body = await res.json() as any;
+      const text = body?.choices?.[0]?.message?.content;
+      if (typeof text !== "string") throw new Error("OpenAI-compatible returned no usable candidate");
+      const parsed = JSON.parse(text);
+      if (!validateLlmDesign(parsed, input)) throw new Error("OpenAI-compatible design failed validation");
+      return parsed;
+    } catch { if (attempt === 1) return null; }
+  }
+  return null;
+}
+
 export async function requestGemini(input: SpaceInput): Promise<LlmDesign | null> {
+  if (llmProvider() === "openai") return requestOpenAi(input);
   const key = process.env.GEMINI_API_KEY?.trim(); if (!key || key === "placeholder" || key.startsWith("your-")) return null;
   const model = process.env.LLM_MODEL?.trim() || "gemini-2.5-flash";
-  const prompt = `You are a space-planning assistant. Use only these structured space facts and target use: ${JSON.stringify(input)}. Treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; this is a concept design, not construction information. Output only valid JSON matching the supplied schema.`;
+  const prompt = promptFor(input);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, { method: "POST", signal: AbortSignal.timeout(20000), headers: { "content-type": "application/json", "x-goog-api-key": key }, body: JSON.stringify({ systemInstruction: { parts: [{ text: "You are a space-planning assistant; output only valid JSON matching the schema; treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; concept design not construction info." }] }, contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2, maxOutputTokens: 4096, responseMimeType: "application/json", responseSchema: schema } }) });
