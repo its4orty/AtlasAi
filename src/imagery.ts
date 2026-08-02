@@ -23,13 +23,29 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Pro
 export async function requestImage(prompt: string, view: string): Promise<ImageResult | null> {
   const token = process.env.CLOUDFLARE_API_TOKEN?.trim(); const account = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
   if (!token || !account || token.startsWith("your-")) return null;
-  const model = process.env.IMAGE_MODEL?.trim() || "@cf/black-forest-labs/FLUX.1-schnell";
+  const model = process.env.IMAGE_MODEL?.trim() || "@cf/black-forest-labs/flux-1-schnell";
   const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/run/${encodeURIComponent(model)}`;
   try {
     const res = await fetchWithTimeout(endpoint, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ prompt }) }, 90000);
     if (!res.ok) throw new Error(`Cloudflare HTTP ${res.status}`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (!bytes.length) throw new Error("empty image");
+    const buffer = await res.arrayBuffer();
+    if (!buffer.byteLength) throw new Error("empty image");
+
+    // FLUX 1 Schnell currently wraps its JPEG as { result: { image: base64 } }.
+    // Keep the binary path for models/versions that return image bytes directly.
+    const body = new TextDecoder().decode(buffer);
+    try {
+      const parsed = JSON.parse(body) as { result?: { image?: unknown } };
+      if (typeof parsed.result?.image === "string" && parsed.result.image.length > 0) {
+        const binary = atob(parsed.result.image);
+        const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+        if (!bytes.length) throw new Error("empty decoded image");
+        return { bytes, mime: "image/jpeg", provider: "cloudflare", model };
+      }
+    } catch {
+      // A raw image body is not JSON; use the bytes below.
+    }
+    const bytes = new Uint8Array(buffer);
     return { bytes, mime: res.headers.get("content-type")?.split(";")[0] || "image/png", provider: "cloudflare", model };
   } catch { /* fall through to the free Pollinations fallback */ }
   try {

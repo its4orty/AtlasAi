@@ -81,6 +81,22 @@ for (let attempt = 1; ; attempt++) {
               "application/octet-stream";
             return new Response(file, { headers: { "Content-Type": mime } });
           }
+
+          // Runtime-generated project renders are written under public/ after
+          // the build, so they are not present in dist/client. Only expose the
+          // project-scoped render path; absent files continue to SSR as before.
+          if (pathname.startsWith("/project-images/")) {
+            const runtimeFile = Bun.file(`${import.meta.dir}/public${pathname}`);
+            if (await runtimeFile.exists()) {
+              const ext = pathname.split(".").pop()?.toLowerCase() ?? "";
+              const mime =
+                (STATIC_MIME as Record<string, string>)[ext] ??
+                "application/octet-stream";
+              return new Response(runtimeFile, {
+                headers: { "Content-Type": mime },
+              });
+            }
+          }
         }
         return (
           handler as { fetch: (r: Request) => Response | Promise<Response> }
