@@ -87,13 +87,32 @@ function pickAreaFact(facts: TwinFactLike[]): TwinFactLike | null {
  * Build the room model from intelligence facts. Room labels are paired with
  * room dimensions in document order — the same explicit assumption as the
  * concept design, flagged in the coverage note.
+ *
+ * Facts accumulate across pipeline re-runs (a re-run appends a fresh set of
+ * room facts), so dimension and label facts are deduplicated by value before
+ * pairing — otherwise re-runs would multiply the room count. Identical rooms
+ * from genuinely different documents are still merged; Phase 1 accepts this
+ * (per-fact provenance is shown in the coverage note).
  */
 function buildTwinRooms(facts: TwinFactLike[]): { rooms: TwinRoom[]; confidence: number | null } {
-  const dims = facts.filter((f) => f.category === "intelligence" && f.key === "room_dimension_m").map((f) => ({
-    dim: parseDim(f.value),
-    confidence: f.confidence,
-  }));
-  const labels = facts.filter((f) => f.category === "intelligence" && f.key === "room_label").map((f) => f.value);
+  const dimFacts: TwinFactLike[] = [];
+  const seenDims = new Set<string>();
+  for (const f of facts) {
+    if (f.category !== "intelligence" || f.key !== "room_dimension_m") continue;
+    if (seenDims.has(f.value)) continue;
+    seenDims.add(f.value);
+    dimFacts.push(f);
+  }
+  const labelFacts: TwinFactLike[] = [];
+  const seenLabels = new Set<string>();
+  for (const f of facts) {
+    if (f.category !== "intelligence" || f.key !== "room_label") continue;
+    if (seenLabels.has(f.value)) continue;
+    seenLabels.add(f.value);
+    labelFacts.push(f);
+  }
+  const dims = dimFacts.map((f) => ({ dim: parseDim(f.value), confidence: f.confidence }));
+  const labels = labelFacts.map((f) => f.value);
   const rooms: TwinRoom[] = [];
   let confidence = 1;
   dims.forEach((d, i) => {
@@ -302,9 +321,20 @@ export function buildTwin(factRows: TwinFactLike[], address: string): DigitalTwi
     };
   }
 
+  const dedupeByValue = (key: string): TwinFactLike[] => {
+    const seen = new Set<string>();
+    const out: TwinFactLike[] = [];
+    for (const f of facts) {
+      if (f.category !== "intelligence" || f.key !== key) continue;
+      if (seen.has(f.value)) continue;
+      seen.add(f.value);
+      out.push(f);
+    }
+    return out;
+  };
   const coverageFacts = [
-    ...facts.filter((f) => f.category === "intelligence" && f.key === "room_dimension_m"),
-    ...facts.filter((f) => f.category === "intelligence" && f.key === "room_label"),
+    ...dedupeByValue("room_dimension_m"),
+    ...dedupeByValue("room_label"),
     ...(areaFact ? [areaFact] : []),
   ];
   return {
