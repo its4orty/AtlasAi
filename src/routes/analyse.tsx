@@ -42,6 +42,9 @@ function Analyse() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
+  const [targetUse, setTargetUse] = useState("barber shop");
+  const [designBusy, setDesignBusy] = useState(false);
+  const [designMsg, setDesignMsg] = useState("");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -61,10 +64,37 @@ function Analyse() {
         return;
       }
       setResult(data as Result);
+      setDesignMsg("");
     } catch {
       setError("Analysis failed — please try again.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function generateDesign(e: React.FormEvent) {
+    e.preventDefault();
+    if (!result || designBusy) return;
+    setDesignBusy(true);
+    setDesignMsg("");
+    try {
+      const r = await fetch("/api/design", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: result.projectId, targetUse }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setDesignMsg(data.error ?? "Design generation failed — please try again.");
+        return;
+      }
+      setDesignMsg(
+        `Concept generated for "${data.programLabel}" — ${data.rooms} room(s), ${data.allocatedM2} m² allocated, ${data.circulationPct}% circulation.`,
+      );
+    } catch {
+      setDesignMsg("Design generation failed — please try again.");
+    } finally {
+      setDesignBusy(false);
     }
   }
 
@@ -132,6 +162,34 @@ function Analyse() {
               Steps marked <strong>pending</strong> are stubs awaiting later phases — the loop
               itself is complete and provably working end-to-end.
             </p>
+
+            <div style={{ borderTop: "1px solid var(--line, #ddd6c8)", marginTop: 20, paddingTop: 18 }}>
+              <p className="section-label">CONCEPT DESIGN · CONVERT TO A NEW USE</p>
+              <form className="analyse-form" onSubmit={generateDesign} aria-label="Generate a concept design">
+                <input
+                  aria-label="Target use"
+                  value={targetUse}
+                  onChange={(e) => setTargetUse(e.target.value)}
+                  placeholder="e.g. barber shop, cafe, office"
+                  disabled={designBusy}
+                />
+                <button type="submit" disabled={designBusy}>
+                  {designBusy ? "Generating concept…" : "Generate concept design"}
+                </button>
+              </form>
+              <p className="form-note" aria-live="polite">
+                {designMsg
+                  ? designMsg
+                  : "The concept is an indicative zoning sketch generated from the space facts in project memory."}
+                {designMsg && !designMsg.startsWith("Concept") && ""}
+                {designMsg.startsWith("Concept") && (
+                  <>
+                    {" "}
+                    <a href={`/report/${result.projectId}`}>Open the report to view the floor plan ↗</a>
+                  </>
+                )}
+              </p>
+            </div>
           </div>
         )}
       </main>
