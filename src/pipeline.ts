@@ -666,6 +666,19 @@ const feasibilityStep: PipelineStepDef = {
  * src/report.ts), records the artifact in memory, and marks the step done.
  * The printable HTML itself is served by /report/$id.
  */
+const complianceStep: PipelineStepDef = {
+  name: "compliance",
+  title: "Planning and change-of-use screening",
+  implemented: true,
+  run: async (ctx) => {
+    const [source] = await ctx.db`INSERT INTO sources (project_id, name, url, notes) VALUES (${ctx.projectId}, 'ATLAS AI compliance data-gap register', NULL, 'No new external data queried; missing constraint layers are recorded honestly.') RETURNING id`;
+    const sourceId = String(source.id);
+    const value = 'Listed building status: not available (no free national API); conservation area: not available; flood risk: not available. These are data gaps, not findings that no constraints exist.';
+    const fact = { category: 'compliance', key: 'constraint_data', value, confidence: 0.2, sourceId };
+    await ctx.db`INSERT INTO facts (project_id, category, key, value, confidence, source_id) VALUES (${ctx.projectId}, ${fact.category}, ${fact.key}, ${fact.value}, ${fact.confidence}, ${fact.sourceId})`;
+    return { status: 'done', output: { note: 'recorded known constraint data gaps', facts: [fact], sources: [{ name: 'ATLAS AI compliance data-gap register', url: null, notes: 'No new external data queried.' }] } };
+  },
+};
 const reportStep: PipelineStepDef = {
   name: "report",
   title: "Report generation",
@@ -908,6 +921,7 @@ export const PIPELINE_STEPS: PipelineStepDef[] = [
   collectionStep,
   intelligenceStep,
   feasibilityStep,
+  complianceStep,
   reportStep,
 ];
 
