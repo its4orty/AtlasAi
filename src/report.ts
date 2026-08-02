@@ -227,6 +227,8 @@ function constraintsSection(facts: MemoryFact[], sources: MemorySource[]): strin
   }
 
   // Other discovery facts (postcode validity, local authority…).
+  const complianceGap = m.get("compliance")?.get("constraint_data");
+  if (complianceGap) flags.push(`<tr class="flag-row"><td class="strong">Constraint data coverage</td><td><span class="badge-warn">Data gaps recorded</span><p class="note">${esc(complianceGap.value)}</p></td><td>${confPct(complianceGap.confidence)}</td><td class="src">ATLAS AI screening</td></tr>`);
   const extras: Array<[string, string, string, string]> = [];
   for (const key of ["postcode_valid", "local_authority"]) {
     const f = discovery.get(key);
@@ -371,9 +373,18 @@ function designSection(facts: MemoryFact[]): string {
     ${svg ? `<div class="design-svg">${svg}</div>` : ""}
     ${zonesHtml ? `<h3 class="sub">Proposed zones</h3>${zonesHtml}` : ""}
     ${assumptions ? `<p class="note caveat">${esc(assumptions)}</p>` : ""}
+    ${complianceBlock(facts)}
   </section>`;
 }
 
+function complianceBlock(facts: MemoryFact[]): string {
+  const c = factMap(facts).get("compliance");
+  const note = c?.get("verdict_note");
+  if (!note) return "";
+  const permission = c?.get("change_of_use_permission_required")?.value ?? "unknown";
+  const title = permission === "no" ? "No change-of-use permission required (screening)" : permission === "yes" ? "Change-of-use permission likely required (screening)" : "Change-of-use verdict unknown";
+  return `<div class="flag ${permission === "no" ? "" : "warn"}"><h3 class="sub">Change of use</h3><p><strong>${esc(title)}</strong></p><p>${esc(note.value)}</p><p class="note">Confidence: ${confPct(note.confidence)}. This is an England Use Classes Order screening, not a planning determination.</p></div>`;
+}
 function confidenceSection(facts: MemoryFact[]): string {
   const low = facts
     .filter((f) => f.confidence < 0.8)
