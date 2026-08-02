@@ -5,18 +5,41 @@ import path from "node:path";
 export interface SpatialFact { key: string; value: string; confidence?: number; }
 export interface RenderPrompt { view: "exterior" | "interior"; prompt: string; hash: string; }
 export interface ImageResult { bytes: Uint8Array; mime: string; provider: string; model: string; }
-const VERSION = "imagery-prompt-v1";
+/**
+ * The designed conversion's own layout, passed from the design step so renders
+ * depict the DESIGNED interior (zones/programme), not just the source evidence.
+ * Only generic labels travel into the prompt — never an address or personal data.
+ */
+export interface DesignContext {
+  programmeLabel?: string;
+  zoneNames?: string[];
+  rooms?: string[];
+  allocatedM2?: number;
+}
+const VERSION = "imagery-prompt-v2";
 const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
 function spatialBrief(facts: SpatialFact[]): string {
   const allowed = facts.filter(f => (f.confidence ?? 1) >= 0.8 && /room|dimension|area|floor|ceiling|layout|use_class/i.test(f.key));
   return allowed.map(f => `${f.key.replace(/_/g, " ")}: ${f.value}`).join("; ").slice(0, 900) || "an indicative commercial interior with an open layout";
 }
-export function buildRenderPrompts(facts: SpatialFact[], targetUse: string): RenderPrompt[] {
+function designBrief(design?: DesignContext): string {
+  if (!design) return "";
+  const parts: string[] = [];
+  if (design.programmeLabel) parts.push(design.programmeLabel);
+  const zones = (design.zoneNames ?? []).filter(Boolean);
+  if (zones.length) parts.push(`zones: ${zones.join(", ")}`);
+  if (design.allocatedM2 && design.allocatedM2 > 0) parts.push(`allocated floor area approx ${design.allocatedM2} m²`);
+  const rooms = (design.rooms ?? []).filter(Boolean);
+  if (rooms.length) parts.push(`rooms: ${rooms.join(", ")}`);
+  return parts.join("; ");
+}
+export function buildRenderPrompts(facts: SpatialFact[], targetUse: string, design?: DesignContext): RenderPrompt[] {
   const brief = spatialBrief(facts);
-  const common = `Target use: ${targetUse}. Spatial brief from evidence: ${brief}. Dimensions not marked high confidence are approximate; do not invent measured facts.`;
+  const designed = designBrief(design);
+  const common = `Target use: ${targetUse}. Spatial brief from evidence: ${brief}.${designed ? ` Designed layout: ${designed}.` : ""} Dimensions not marked high confidence are approximate; do not invent measured facts.`;
   const exterior = `Photorealistic architectural visualization, exterior concept visualisation not a photograph. ${common} Show a plausible street-facing commercial premises adapted for the target use, with a welcoming entrance and restrained contemporary materials. Use a natural eye-level three-quarter viewpoint, realistic daylight, accurate architectural scale, subtle weathering and soft shadows. Include a calm, coherent composition and realistic lens perspective. Keep the frontage generic and do not identify a real property. No people, no text, no logos, no signage lettering, no personal data. Concept visualisation not a photograph.`;
-  const interior = `Photorealistic architectural visualization, interior concept visualisation not a photograph. ${common} Show the proposed target-use interior with the recorded room arrangement represented honestly, clear accessible circulation between zones, and only generic finishes such as timber, painted plaster, glass and durable flooring. Use a wide-angle eye-level viewpoint, realistic daylight supplemented by warm practical lighting, natural material texture and believable construction. Include a calm, coherent composition and realistic lens perspective. Do not add measured rooms or dimensions absent from the brief. No people, no text, no logos, no personal data. Concept visualisation not a photograph.`;
-  return [{ view: "exterior", prompt: exterior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|exterior`).digest("hex") }, { view: "interior", prompt: interior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|interior`).digest("hex") }].filter(p => words(p.prompt) >= 80 && words(p.prompt) <= 180);
+  const interior = `Photorealistic architectural visualization, interior concept visualisation not a photograph. ${common} Show the proposed target-use interior arranged to match this designed layout, with clear accessible circulation between the listed zones, appropriate equipment and fittings for the target use, and only generic finishes such as timber, painted plaster, glass and durable flooring. Use a wide-angle eye-level viewpoint, realistic daylight supplemented by warm practical lighting, natural material texture and believable construction. Include a calm, coherent composition and realistic lens perspective. Do not add measured rooms or dimensions absent from the brief. No people, no text, no logos, no personal data. Concept visualisation not a photograph.`;
+  return [{ view: "exterior", prompt: exterior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|${JSON.stringify(design ?? null)}|exterior`).digest("hex") }, { view: "interior", prompt: interior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|${JSON.stringify(design ?? null)}|interior`).digest("hex") }].filter(p => words(p.prompt) >= 80 && words(p.prompt) <= 180);
 }
 // Network calls are bounded so a provider outage does not block the design step.
 async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> { return fetch(url, { ...init, signal: AbortSignal.timeout(ms) }); }
