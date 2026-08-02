@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { designInputHash, requestGemini, validateLlmDesign, type SpaceInput } from "./llm";
 
 /**
@@ -64,6 +64,16 @@ function mockFetchResolving(text: string): (url: string | URL | Request, init?: 
 afterEach(() => {
   delete process.env.GEMINI_API_KEY;
   delete process.env.LLM_MODEL;
+  delete process.env.LLM_PROVIDER;
+  delete process.env.LLM_API_KEY;
+  delete process.env.LLM_BASE_URL;
+});
+beforeEach(() => {
+  // Hermetic: .env injects LLM_PROVIDER=openai at startup — Gemini tests must
+  // not inherit it (llmProvider() reads the env dynamically).
+  delete process.env.LLM_PROVIDER;
+  delete process.env.LLM_API_KEY;
+  delete process.env.LLM_BASE_URL;
 });
 
 describe("requestGemini", () => {
