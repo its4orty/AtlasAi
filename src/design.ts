@@ -3,6 +3,7 @@ import { ensureSchema } from "~/project-schema";
 import { currentUseClass, targetUseClass, complianceVerdict } from "~/compliance";
 import { renderAxonometric } from "~/axo";
 import { designInputHash, requestGemini, type LlmDesign } from "~/llm";
+import { buildRenderPrompts, requestImage, saveRender, imageryPromptVersion } from "~/imagery";
 
 /**
  * ATLAS AI — concept design generation (Phase 1).
@@ -625,8 +626,20 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
         ${llmDesign ? "'LLM-generated concept from structured space facts (Gemini); indicative only, not construction information.'" : "'Rule-based zoning concept generated from project-memory space facts and an indicative target-use programme. Assumptions: room-label/dimension pairing in document order; circulation 20–30%; screening-level zone sizes. Advisory only — not for construction.'"})
       RETURNING id`;
     const sourceId = String(src.id);
+    const imageryFacts: Array<{ category: string; key: string; value: string; confidence: number; sourceId: string | null }> = [];
+    const imageToken = process.env.CLOUDFLARE_API_TOKEN?.trim() && process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+    if (!imageToken || imageToken.startsWith("your-")) imageryFacts.push({ category: "imagery", key: "imagery_status", value: "skipped", confidence: 1, sourceId });
+    else for (const p of buildRenderPrompts(factsAll.map(f => ({ key: f.key, value: f.value, confidence: Number(f.confidence) })), targetUse).slice(0, 2)) {
+      const [cachedImage] = await db`SELECT value FROM facts WHERE project_id = ${projectId} AND category = 'imagery' AND key = ${`imagery_${p.view}_prompt_hash`} AND value = ${p.hash} ORDER BY id DESC LIMIT 1`;
+      if (cachedImage) continue;
+      const result = await requestImage(p.prompt, p.view);
+      if (!result) { imageryFacts.push({ category: "imagery", key: `imagery_${p.view}_status`, value: "failed", confidence: 1, sourceId }); continue; }
+      const url = await saveRender(projectId, p.view, result);
+      for (const [key, value] of [[`imagery_${p.view}_status`, "generated"], [`imagery_${p.view}_url`, url], [`imagery_${p.view}_prompt_hash`, p.hash], [`imagery_${p.view}_provider`, result.provider], [`imagery_${p.view}_model`, result.model], [`imagery_${p.view}_prompt_version`, imageryPromptVersion], [`imagery_${p.view}_target_use`, targetUse], [`imagery_${p.view}_generated_at`, generatedAt], [`imagery_${p.view}_mime`, result.mime]] as [string, string][]) imageryFacts.push({ category: "imagery", key, value, confidence: 1, sourceId });
+    }
 
     const factOuts: Array<{ category: string; key: string; value: string; confidence: number; sourceId: string | null }> = [
+      ...imageryFacts,
       { category: "design", key: "design_target_use", value: targetUse, confidence: 0.95, sourceId },
       { category: "design", key: "design_program_label", value: program.label, confidence: 0.9, sourceId },
       { category: "design", key: "design_status", value: llmDesign ? "generated_llm" : "generated_deterministic", confidence: 1, sourceId },
