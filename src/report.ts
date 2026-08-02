@@ -318,6 +318,62 @@ function financialSection(facts: MemoryFact[]): string {
   </section>`;
 }
 
+/**
+ * Section 5 — concept design ("convert to X"). Rendered only when the design
+ * step has run for this project (design facts exist in memory). The SVG is
+ * inserted as-is: it is generated server-side by src/design.ts, not user input.
+ */
+function designSection(facts: MemoryFact[]): string {
+  // Latest design wins: facts accumulate across re-runs, so iterate in id order
+  // and overwrite — the newest concept is the one shown.
+  const d = new Map<string, MemoryFact>();
+  for (const f of facts) {
+    if (f.category !== "design") continue;
+    d.set(f.key, f);
+  }
+  if (!d.has("design_status")) return "";
+  const svg = d.get("design_concept_svg")?.value ?? null;
+  const programLabel = d.get("design_program_label")?.value ?? d.get("design_target_use")?.value ?? "—";
+  const generatedAt = d.get("design_generated_at")?.value ?? null;
+  const totalArea = d.get("design_total_floor_area_m2")?.value;
+  const allocated = d.get("design_allocated_m2")?.value;
+  const circulation = d.get("design_circulation_pct")?.value;
+  const assumptions = d.get("design_assumptions")?.value;
+
+  let zonesHtml = "";
+  const zonesRaw = d.get("design_zones")?.value;
+  if (zonesRaw) {
+    try {
+      const zones = JSON.parse(zonesRaw) as Array<{
+        zone: string;
+        room: string;
+        area_m2: number;
+        retained: boolean;
+        tight: boolean;
+      }>;
+      zonesHtml = evidenceTable(
+        zones.map((zRow) => [
+          zRow.zone,
+          `${esc(zRow.room)} · ${zRow.area_m2} m²${zRow.retained ? " (retained)" : " (new)"}${zRow.tight ? " ⚠ tight fit" : ""}`,
+          "—",
+          zRow.retained ? "existing room reused" : "new sub-division",
+        ]),
+      );
+    } catch {
+      zonesHtml = "";
+    }
+  }
+
+  return `<section>
+    <h2><span class="num">5</span>Concept design — convert to ${esc(programLabel)}</h2>
+    <p class="lede">An indicative zoning concept generated from the space facts in project memory (room dimensions, labels, floor area). It is a screening sketch — <strong>not a professional design, not for construction</strong>, and no planning or statutory compliance has been checked.</p>
+    ${totalArea ? `<p class="note">Floor area used: ${esc(totalArea)} m² · allocated to zones: ${esc(allocated ?? "—")} m² · circulation: ${esc(circulation ?? "—")}%${generatedAt ? ` · generated ${fmtDate(generatedAt.slice(0, 10))}` : ""}.</p>` : ""}
+    ${svg ? `<div class="design-svg">${svg}</div>` : ""}
+    ${zonesHtml ? `<h3 class="sub">Proposed zones</h3>${zonesHtml}` : ""}
+    ${assumptions ? `<p class="note caveat">${esc(assumptions)}</p>` : ""}
+  </section>`;
+}
+
 function confidenceSection(facts: MemoryFact[]): string {
   const low = facts
     .filter((f) => f.confidence < 0.8)
@@ -333,7 +389,7 @@ function confidenceSection(facts: MemoryFact[]): string {
       `<tr><td class="strong">${esc(f.key)}</td><td>${esc(f.category)}</td><td>${esc(f.value.slice(0, 80))}${f.value.length > 80 ? "…" : ""}</td><td>${confPct(f.confidence)}</td><td class="src">${esc(f.source_name ?? "inferred")}</td></tr>`,
   );
   return `<section>
-    <h2><span class="num">5</span>Confidence summary — needs review</h2>
+    <h2><span class="num">6</span>Confidence summary — needs review</h2>
     <p class="lede">Every fact below carries confidence below 80% and should be treated as needing review before reliance. This includes all assumption-led financial outputs by design.</p>
     <table class="ev">
       <thead><tr><th>Fact</th><th>Category</th><th>Value</th><th>Confidence</th><th>Source</th></tr></thead>
@@ -365,7 +421,7 @@ function reviewSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">6</span>Items requiring professional review</h2>
+    <h2><span class="num">7</span>Items requiring professional review</h2>
     <ul class="review">
       ${items.map((i) => `<li>${i}</li>`).join("")}
       ${items.length === 0 ? "<li>No outstanding professional-review items were identified from the evidence recorded.</li>" : ""}
@@ -420,6 +476,9 @@ ul.review{padding:0;margin:12px 0 0;list-style:none}
 ul.review li{padding:11px 14px 11px 40px;background:#fff;border:1px solid var(--line);border-top:0;font-size:13.5px;position:relative}
 ul.review li:first-child{border-top:1px solid var(--line)}
 ul.review li:before{content:"!";position:absolute;left:14px;top:9px;color:var(--copper);font:700 15px Manrope}
+/* Concept design */
+.design-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
+.design-svg svg{width:100%;height:auto;display:block}
 /* Footer */
 .disclaimer{background:var(--ink);color:#d7d5ce;padding:26px 40px;font-size:12px}
 .disclaimer h3{color:var(--copper-light);font-size:12px;text-transform:uppercase;letter-spacing:.14em;margin:0 0 10px}
@@ -499,6 +558,7 @@ export function renderReportHtml(memory: ProjectMemoryLike): string {
     marketSection(facts),
     constraintsSection(facts, sources),
     financialSection(facts),
+    designSection(facts),
     confidenceSection(facts),
     reviewSection(facts),
     disclaimer,
