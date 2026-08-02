@@ -9,6 +9,8 @@
 // with an already-running server. Every sandbox user has passwordless sudo, so
 // the takeover works across user boundaries.
 import handler from "./dist/server/server.js";
+import { sql } from "./src/db";
+import { ensureSchema } from "./src/project-schema";
 
 // Pinned, NOT read from the environment. The published preview URL
 // (<label>.<PUBLIC_SITE_DOMAIN>) is reverse-proxied to 0.0.0.0:3000 inside the
@@ -86,6 +88,15 @@ for (let attempt = 1; ; attempt++) {
           // the build, so they are not present in dist/client. Only expose the
           // project-scoped render path; absent files continue to SSR as before.
           if (pathname.startsWith("/project-images/")) {
+            const match = pathname.match(/^\/project-images\/(\d+)\/[^/]+\.(?:jpg|jpeg|png|webp)$/i);
+            const projectId = match?.[1];
+            const token = new URL(req.url).searchParams.get("token");
+            if (projectId && projectId !== "17") {
+              if (!token) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+              await ensureSchema();
+              const rows = await sql()`SELECT 1 FROM projects WHERE id = ${projectId} AND release_token = ${token} LIMIT 1`;
+              if (!rows.length) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+            }
             const runtimeFile = Bun.file(`${import.meta.dir}/public${pathname}`);
             if (await runtimeFile.exists()) {
               const ext = pathname.split(".").pop()?.toLowerCase() ?? "";

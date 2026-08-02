@@ -70,9 +70,12 @@ export async function ensureSchema(): Promise<void> {
       id BIGSERIAL PRIMARY KEY,
       address TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'created',
+      release_token TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
+  await db`ALTER TABLE projects ADD COLUMN IF NOT EXISTS release_token TEXT`;
+
   await db`
     CREATE TABLE IF NOT EXISTS sources (
       id BIGSERIAL PRIMARY KEY,
