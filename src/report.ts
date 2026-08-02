@@ -333,6 +333,13 @@ function designSection(facts: MemoryFact[]): string {
     if (f.category !== "design") continue;
     d.set(f.key, f);
   }
+  // Same latest-wins rule for compliance facts: the change-of-use verdict must
+  // match the design being displayed, not the first design ever generated.
+  const compliance = new Map<string, MemoryFact>();
+  for (const f of facts) {
+    if (f.category !== "compliance") continue;
+    compliance.set(f.key, f);
+  }
   if (!d.has("design_status")) return "";
   const svg = d.get("design_concept_svg")?.value ?? null;
   const programLabel = d.get("design_program_label")?.value ?? d.get("design_target_use")?.value ?? "—";
@@ -373,15 +380,14 @@ function designSection(facts: MemoryFact[]): string {
     ${svg ? `<div class="design-svg">${svg}</div>` : ""}
     ${zonesHtml ? `<h3 class="sub">Proposed zones</h3>${zonesHtml}` : ""}
     ${assumptions ? `<p class="note caveat">${esc(assumptions)}</p>` : ""}
-    ${complianceBlock(facts)}
+    ${complianceBlock(compliance)}
   </section>`;
 }
 
-function complianceBlock(facts: MemoryFact[]): string {
-  const c = factMap(facts).get("compliance");
-  const note = c?.get("verdict_note");
+function complianceBlock(c: Map<string, MemoryFact>): string {
+  const note = c.get("verdict_note");
   if (!note) return "";
-  const permission = c?.get("change_of_use_permission_required")?.value ?? "unknown";
+  const permission = c.get("change_of_use_permission_required")?.value ?? "unknown";
   const title = permission === "no" ? "No change-of-use permission required (screening)" : permission === "yes" ? "Change-of-use permission likely required (screening)" : "Change-of-use verdict unknown";
   return `<div class="flag ${permission === "no" ? "" : "warn"}"><h3 class="sub">Change of use</h3><p><strong>${esc(title)}</strong></p><p>${esc(note.value)}</p><p class="note">Confidence: ${confPct(note.confidence)}. This is an England Use Classes Order screening, not a planning determination.</p></div>`;
 }
