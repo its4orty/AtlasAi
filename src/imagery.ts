@@ -18,22 +18,20 @@ export function buildRenderPrompts(facts: SpatialFact[], targetUse: string): Ren
   const interior = `Photorealistic architectural visualization, interior concept visualisation not a photograph. ${common} Show the proposed target-use interior with the recorded room arrangement represented honestly, clear accessible circulation between zones, and only generic finishes such as timber, painted plaster, glass and durable flooring. Use a wide-angle eye-level viewpoint, realistic daylight supplemented by warm practical lighting, natural material texture and believable construction. Include a calm, coherent composition and realistic lens perspective. Do not add measured rooms or dimensions absent from the brief. No people, no text, no logos, no personal data. Concept visualisation not a photograph.`;
   return [{ view: "exterior", prompt: exterior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|exterior`).digest("hex") }, { view: "interior", prompt: interior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|interior`).digest("hex") }].filter(p => words(p.prompt) >= 80 && words(p.prompt) <= 180);
 }
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+// Network calls are bounded so a provider outage does not block the design step.
 async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> { return fetch(url, { ...init, signal: AbortSignal.timeout(ms) }); }
 export async function requestImage(prompt: string, view: string): Promise<ImageResult | null> {
   const token = process.env.CLOUDFLARE_API_TOKEN?.trim(); const account = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
   if (!token || !account || token.startsWith("your-")) return null;
   const model = process.env.IMAGE_MODEL?.trim() || "@cf/black-forest-labs/FLUX.1-schnell";
   const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/run/${encodeURIComponent(model)}`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const res = await fetchWithTimeout(endpoint, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ prompt }) }, 90000);
-      if (!res.ok) throw new Error(`Cloudflare HTTP ${res.status}`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (!bytes.length) throw new Error("empty image");
-      return { bytes, mime: res.headers.get("content-type")?.split(";")[0] || "image/png", provider: "cloudflare", model };
-    } catch { if (attempt === 0) await sleep(100 + Math.random() * 250); }
-  }
+  try {
+    const res = await fetchWithTimeout(endpoint, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ prompt }) }, 90000);
+    if (!res.ok) throw new Error(`Cloudflare HTTP ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!bytes.length) throw new Error("empty image");
+    return { bytes, mime: res.headers.get("content-type")?.split(";")[0] || "image/png", provider: "cloudflare", model };
+  } catch { /* fall through to the free Pollinations fallback */ }
   try {
     const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&model=flux&nologo=true`;
     const res = await fetchWithTimeout(url, {}, 120000); if (!res.ok) return null;
