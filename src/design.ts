@@ -1,6 +1,7 @@
 import { sql } from "~/db";
 import { ensureSchema } from "~/project-schema";
 import { currentUseClass, targetUseClass, complianceVerdict } from "~/compliance";
+import { renderAxonometric } from "~/axo";
 
 /**
  * ATLAS AI — concept design generation (Phase 1).
@@ -577,6 +578,7 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       ceilingHeightM,
       generatedAt: generatedAt.slice(0, 10),
     });
+    const axoSvg = renderAxonometric({ title: `CONCEPT DESIGN — ${program.label}`, address: String(proj.address), rooms, newLabels: rooms.map(() => "new"), ceilingHeightM, generatedAt: generatedAt.slice(0, 10) });
 
     // Resolve current use from the strongest available EPC class, then document text.
     const currentClassFact = factsAll.find((f) => f.category === "epc" && f.key === "use_class");
@@ -627,6 +629,7 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       },
       { category: "design", key: "design_assumptions", value: allNotes, confidence: 0.9, sourceId },
       { category: "design", key: "design_concept_svg", value: svg, confidence: 0.5, sourceId },
+      { category: "design", key: "design_concept_axo_svg", value: axoSvg, confidence: 0.5, sourceId },
       { category: "compliance", key: "current_use_class", value: currentClass ?? "unknown", confidence: currentClassFact ? 0.95 : currentClass ? 0.65 : 0.25, sourceId },
       { category: "compliance", key: "target_use_class", value: targetClass ?? "unknown", confidence: targetClass ? 0.9 : 0.25, sourceId },
       { category: "compliance", key: "change_of_use_permission_required", value: compliance.permission, confidence: compliance.confidence, sourceId },

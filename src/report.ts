@@ -336,6 +336,7 @@ function twinSection(facts: MemoryFact[]): string {
   if (!t.has("twin_status")) return "";
   const status = t.get("twin_status")?.value ?? "";
   const svg = t.get("twin_floor_plan_svg")?.value ?? null;
+  const axoSvg = t.get("twin_floor_plan_axo_svg")?.value ?? null;
   const description = t.get("twin_layout_description")?.value ?? null;
   const coverage = t.get("twin_data_coverage")?.value ?? null;
   const roomsRaw = t.get("twin_rooms")?.value ?? null;
@@ -370,7 +371,8 @@ function twinSection(facts: MemoryFact[]): string {
     <h2><span class="num">5</span>Existing layout (digital twin)</h2>
     <p class="lede">The current ("as-built") layout of the property, generated from the confidence-scored space facts in project memory. This is the "before" to the concept design's "after" — it is <strong>indicative, not a surveyed plan</strong>, and it never invents rooms or dimensions that are not in the evidence.</p>
     ${totalArea ? `<p class="note">Total floor area: ${esc(totalArea)} m².</p>` : ""}
-    ${svg ? `<div class="twin-svg">${svg}</div>` : ""}
+    ${svg ? `<div class="twin-svg"><p class="note"><strong>Existing layout — 2D plan</strong></p>${svg}</div>` : ""}
+    ${axoSvg ? `<div class="twin-svg"><p class="note"><strong>3D-style view (indicative, not photorealistic)</strong></p>${axoSvg}<p class="note caveat">Schematic extrusion from the same project-memory evidence, not a surveyed or photorealistic render. ${status === "generated" && roomsRaw ? "Room geometry is limited to recorded dimensions; verify with a measured survey." : "Footprint-only extrusion: only total area was evidenced; shape and rooms are not known."}</p></div>` : ""}
     ${description ? `<p class="note">${esc(description)}</p>` : ""}
     ${roomsHtml ? `<h3 class="sub">Rooms recorded</h3>${roomsHtml}` : ""}
     ${coverage ? `<div class="flag"><h3 class="sub">Data coverage</h3><p class="note">${esc(coverage)}</p></div>` : ""}
@@ -399,6 +401,7 @@ function designSection(facts: MemoryFact[]): string {
   }
   if (!d.has("design_status")) return "";
   const svg = d.get("design_concept_svg")?.value ?? null;
+  const axoSvg = d.get("design_concept_axo_svg")?.value ?? null;
   const programLabel = d.get("design_program_label")?.value ?? d.get("design_target_use")?.value ?? "—";
   const generatedAt = d.get("design_generated_at")?.value ?? null;
   const totalArea = d.get("design_total_floor_area_m2")?.value;
@@ -434,7 +437,8 @@ function designSection(facts: MemoryFact[]): string {
     <h2><span class="num">6</span>Concept design — convert to ${esc(programLabel)}</h2>
     <p class="lede">An indicative zoning concept generated from the space facts in project memory (room dimensions, labels, floor area). It is a screening sketch — <strong>not a professional design, not for construction</strong>, and no planning or statutory compliance has been checked.</p>
     ${totalArea ? `<p class="note">Floor area used: ${esc(totalArea)} m² · allocated to zones: ${esc(allocated ?? "—")} m² · circulation: ${esc(circulation ?? "—")}%${generatedAt ? ` · generated ${fmtDate(generatedAt.slice(0, 10))}` : ""}.</p>` : ""}
-    ${svg ? `<div class="design-svg">${svg}</div>` : ""}
+    ${svg ? `<div class="design-svg"><p class="note"><strong>Concept design — 2D plan</strong></p>${svg}</div>` : ""}
+    ${axoSvg ? `<div class="design-svg"><p class="note"><strong>3D-style view (indicative, not photorealistic)</strong></p>${axoSvg}<p class="note caveat">Schematic extrusion from the same project-memory room evidence, not a surveyed or photorealistic render. This concept remains indicative and not for construction.</p></div>` : ""}
     ${zonesHtml ? `<h3 class="sub">Proposed zones</h3>${zonesHtml}` : ""}
     ${assumptions ? `<p class="note caveat">${esc(assumptions)}</p>` : ""}
     ${complianceBlock(compliance)}
