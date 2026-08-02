@@ -53,3 +53,4 @@ table.facts tr:last-child td{border-bottom:0}
   .analyse-form button{padding:16px;margin-top:8px}
   .nav-links{gap:12px 18px;flex-wrap:wrap;justify-content:flex-end}
 }
+.text-button{border:0;background:none;color:var(--copper);font:700 12px Manrope;text-decoration:underline;cursor:pointer;padding:0}.text-button:disabled{opacity:.6;cursor:wait}.evidence-form input{font:13px Manrope;padding:12px;min-width:0}.evidence-form button{padding:0 16px}

@@ -79,6 +79,12 @@ function ProjectView() {
     error: "",
   });
 
+  const [uploading, setUploading] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [rerunning, setRerunning] = useState(false);
+  const [rerunMessage, setRerunMessage] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     setState({ loading: true, data: null, error: "" });
@@ -100,6 +106,35 @@ function ProjectView() {
       cancelled = true;
     };
   }, [id]);
+
+  async function uploadEvidence(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const input = e.currentTarget.elements.namedItem("evidence") as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file || uploading) return;
+    setUploading(true); setUploadError(""); setRerunMessage("");
+    try {
+      const form = new FormData(); form.append("projectId", id); form.append("file", file);
+      const r = await fetch("/api/documents", { method: "POST", body: form });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error ?? "Upload failed — please try again.");
+      setUploadedFile(d.filename ?? file.name); input.value = "";
+    } catch (err) { setUploadError(err instanceof Error ? err.message : "Upload failed — please try again."); }
+    finally { setUploading(false); }
+  }
+  async function rerunAnalysis() {
+    if (rerunning) return;
+    setRerunning(true); setUploadError(""); setRerunMessage("");
+    try {
+      const r = await fetch("/api/analyse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId: id }) });
+      const d = await r.json(); if (!r.ok) throw new Error(d.error ?? "Re-run failed — please try again.");
+      setRerunMessage("Analysis re-run complete — project memory refreshed.");
+      const refreshed = await fetch(`/api/project?id=${encodeURIComponent(id)}`); const memory = await refreshed.json();
+      if (!refreshed.ok) throw new Error(memory.error ?? "Could not refresh project");
+      setState({ loading: false, data: memory as ProjectMemory, error: "" });
+    } catch (err) { setUploadError(err instanceof Error ? err.message : "Re-run failed — please try again."); }
+    finally { setRerunning(false); }
+  }
 
   return (
     <div className="app-page">
@@ -145,6 +180,17 @@ function ProjectView() {
             </p>
 
             <div className="panel" style={{ marginTop: 34 }}>
+              <p className="section-label">UPLOAD EVIDENCE</p>
+              <h2>Floor plan or EPC</h2>
+              <p className="form-note">Upload a floor plan or EPC (PDF) — the pipeline&apos;s intelligence step will extract space facts when re-run.</p>
+              <form className="analyse-form evidence-form" onSubmit={uploadEvidence} style={{ marginTop: 16 }}>
+                <input name="evidence" type="file" accept=".pdf,application/pdf" aria-label="Evidence PDF" disabled={uploading} />
+                <button type="submit" disabled={uploading}>{uploading ? "Uploading…" : "Upload PDF"}</button>
+              </form>
+              {uploadedFile && <p className="form-note" aria-live="polite">Uploaded: <strong>{uploadedFile}</strong>. <button type="button" className="text-button" onClick={rerunAnalysis} disabled={rerunning}>{rerunning ? "Re-running…" : "Re-run analysis"}</button></p>}
+              {(uploadError || rerunMessage) && <p className="form-note" aria-live="polite" style={uploadError ? { color: "#9b2c2c" } : undefined}>{uploadError || rerunMessage}</p>}
+            </div>
+            <div className="panel" style={{ marginTop: 22 }}>
               <p className="section-label">FEASIBILITY REPORT</p>
               <p className="form-note" style={{ margin: "0 0 12px" }}>
                 The evidence-backed, printable feasibility screening for this
@@ -187,6 +233,7 @@ function ProjectView() {
               )}
             </div>
 
+            <p style={{ margin: "22px 0 0" }}><a className="button" style={{ textDecoration: "none", display: "inline-block" }} href="/analyse">Try another address <span>↗</span></a></p>
             <div className="panel" style={{ marginTop: 22 }}>
               <p className="section-label">EXTRACTED FACTS</p>
               {state.data.facts.length === 0 ? (
