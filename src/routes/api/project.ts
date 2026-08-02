@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { getProjectMemory } from "~/pipeline";
+import { canViewProject, lockedResponse } from "~/access";
 
 /**
  * GET /api/project?id=<id> — load a project's full memory (project row,
@@ -18,6 +19,7 @@ export const Route = createFileRoute("/api/project")({
           return Response.json({ error: "project memory unavailable" }, { status: 503 });
         }
         try {
+          if (!(await canViewProject(id, new URL(request.url).searchParams.get("token")))) return lockedResponse();
           return Response.json(await getProjectMemory(id));
         } catch (err) {
           const message = err instanceof Error ? err.message : "";
