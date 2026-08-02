@@ -579,8 +579,8 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
     });
 
     // Resolve current use from the strongest available EPC class, then document text.
-    const currentClassFact = facts.find((f) => f.category === "epc" && f.key === "use_class");
-    const currentTextFact = facts.find((f) => /current.?use|property.?type/i.test(f.key));
+    const currentClassFact = factsAll.find((f) => f.category === "epc" && f.key === "use_class");
+    const currentTextFact = factsAll.find((f) => /current.?use|property.?type/i.test(f.key));
     const currentClass = currentClassFact?.value?.trim() || (currentTextFact ? currentUseClass(currentTextFact.value) : null);
     const targetClass = targetUseClass(targetUse);
     const compliance = complianceVerdict(currentClass, targetClass);
