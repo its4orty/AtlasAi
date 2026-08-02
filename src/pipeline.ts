@@ -142,13 +142,91 @@ async function fetchJson(url: string): Promise<{ response: Response; json: Recor
   return { response, json };
 }
 
+/* ------------------------------------------------------------------ */
+/* EPC register (MHCLG Energy Certificate Data API) helpers            */
+/* Base URL + bearer-token auth per the official docs:                 */
+/* https://get-energy-performance-data.communities.gov.uk/guidance/    */
+/*   energy-certificate-data-apis                                      */
+/* ------------------------------------------------------------------ */
+const EPC_API_BASE = "https://api.get-energy-performance-data.communities.gov.uk";
+const EPC_API_DOCS = "https://get-energy-performance-data.communities.gov.uk/guidance/energy-certificate-data-apis";
+
+/** Search one register (domestic / non-domestic) by postcode; returns summary rows or []. */
+async function epcSearchRows(path: string, token: string): Promise<Record<string, unknown>[]> {
+  try {
+    const response = await fetch(`${EPC_API_BASE}${path}`, {
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return [];
+    const json = (await response.json().catch(() => null)) as { data?: unknown } | null;
+    return Array.isArray(json?.data) ? (json.data as Record<string, unknown>[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Fetch the full certificate for an RRN; returns the record object or null. */
+async function epcFetchCertificate(rrn: string, token: string): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await fetch(`${EPC_API_BASE}/api/certificate?certificate_number=${encodeURIComponent(rrn)}`, {
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return null;
+    const json = (await response.json().catch(() => null)) as { data?: unknown } | null;
+    return json?.data && typeof json.data === "object" ? (json.data as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Uppercase, punctuation-collapsed address fragment for comparison. */
+function normAddr(s: string): string {
+  return s.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+}
+/** Leading house number or range ("244", "242-244"), or "" if none. */
+function houseNumber(s: string): string {
+  const m = normAddr(s).match(/^(\d+[A-Z]?(?:-\d+[A-Z]?)?)/);
+  return m ? m[1] : "";
+}
+/** Street name from a register row (address minus leading number). */
+function streetName(s: string): string {
+  return normAddr(s).replace(/^\d+[A-Z]?(?:-\d+[A-Z]?)?\s*/, "").split(",")[0].trim();
+}
+function numbersOverlap(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const parse = (x: string) => x.split("-").map((n) => parseInt(n, 10));
+  const [a1, a2] = parse(a);
+  const [b1, b2] = parse(b);
+  const ar = [Math.min(a1, a2 ?? a1), Math.max(a1, a2 ?? a1)];
+  const br = [Math.min(b1, b2 ?? b1), Math.max(b1, b2 ?? b1)];
+  return ar[0] <= br[1] && br[0] <= ar[1];
+}
+/**
+ * 0..1 match score between the project address and a register summary row.
+ * 1 = same street + overlapping house number; 0.7 = same street, number unknown;
+ * 0 = different street (or nothing to compare).
+ */
+function epcAddressScore(projectAddr: string, row: Record<string, unknown>): number {
+  const proj = normAddr(projectAddr).replace(/\b[A-Z]{1,2}\d[A-Z0-9]?\s?\d[A-Z]{2}\b/, " ");
+  const cand = normAddr(`${String(row.addressLine1 ?? "")} ${String(row.addressLine2 ?? "")}`);
+  if (!cand) return 0;
+  const cStreet = streetName(cand);
+  if (!cStreet || !proj.includes(cStreet)) return 0;
+  const pNum = houseNumber(proj);
+  const cNum = houseNumber(cand);
+  if (!pNum || !cNum) return 0.7;
+  return numbersOverlap(pNum, cNum) ? 1 : 0;
+}
+
 /** REAL step — free, evidence-backed screening lookups. Each provider is isolated. */
 const discoveryStep: PipelineStepDef = {
   name: "discovery", title: "Property discovery", implemented: true,
   run: async (ctx) => {
     const facts: FactOut[] = [];
     const sources: SourceOut[] = [];
-    const add = async (name: string, url: string | null, notes: string, values: Array<[string, string, number]> = []) => {
+    const add = async (name: string, url: string | null, notes: string, values: Array<[string, string, number]> = []): Promise<string> => {
       const [row] = await ctx.db`INSERT INTO sources (project_id, name, url, notes) VALUES (${ctx.projectId}, ${name}, ${url}, ${notes}) RETURNING id`;
       const sourceId = String(row.id);
       sources.push({ name, url, notes });
@@ -157,6 +235,7 @@ const discoveryStep: PipelineStepDef = {
         facts.push(fact);
         await ctx.db`INSERT INTO facts (project_id, category, key, value, confidence, source_id) VALUES (${ctx.projectId}, ${fact.category}, ${key}, ${value}, ${confidence}, ${sourceId})`;
       }
+      return sourceId;
     };
     const [postcodeRow] = await ctx.db`SELECT value FROM facts WHERE project_id = ${ctx.projectId} AND category = 'address' AND key = 'postcode' ORDER BY id DESC LIMIT 1`;
     const postcode = postcodeRow?.value ? String(postcodeRow.value) : null;
@@ -200,13 +279,75 @@ const discoveryStep: PipelineStepDef = {
       await add("Historic England NHLE", url, "Historic England National Heritage List official map/list search checked as a limited-data source; no unauthenticated point API available. No heritage conclusion is made; buffer/list review required.");
     } catch (err) { await add("Historic England NHLE", "https://historicengland.org.uk/listing/the-list/", `Official NHLE source limited-data check failed: ${err instanceof Error ? err.message : String(err)}.`); }
 
-    // 5. EPC API: never expose the token; skip until owner registers for free access.
+    // 5. EPC register (MHCLG Energy Certificate Data API — free developer token, OGL v3).
+    //    Searches domestic + non-domestic registers by postcode, matches to the
+    //    project address, fetches the winning certificate and writes EPC facts.
+    //    The token is never exposed in outputs; absence is recorded honestly.
     try {
       const token = process.env.EPC_API_KEY?.trim();
       const configured = token && token !== "placeholder" && token !== "your-epc-api-key";
-      if (!configured) { await add("EPC Open Data Communities", "https://epc.opendatacommunities.org/docs/api/domestic", "Skipped: EPC API key not configured. Owner must register for a free token; no EPC claim made."); }
-      else { await add("EPC Open Data Communities", "https://epc.opendatacommunities.org/docs/api/domestic", "EPC lookup is configured but postcode/address matching adapter is intentionally deferred until token-backed integration is enabled."); }
-    } catch (err) { await add("EPC Open Data Communities", "https://epc.opendatacommunities.org/docs/api/domestic", `EPC check failed: ${err instanceof Error ? err.message : String(err)}.`); }
+      if (!configured) {
+        await add("EPC register (MHCLG API)", EPC_API_DOCS, "Skipped: EPC API key not configured. Owner must register for a free developer token (GOV.UK One Login); no EPC claim made.");
+      } else if (!postcode) {
+        await add("EPC register (MHCLG API)", EPC_API_DOCS, "EPC lookup skipped: no postcode extracted from the address, so the register cannot be searched.");
+      } else {
+        const pc = postcode.replace(/\s/g, "").toUpperCase();
+        const searchUrl = `${EPC_API_BASE}/api/domestic/search?postcode=${encodeURIComponent(pc)}`;
+        const [normRow] = await ctx.db`SELECT value FROM facts WHERE project_id = ${ctx.projectId} AND category = 'address' AND key = 'normalised' ORDER BY id DESC LIMIT 1`;
+        const projectAddr = normRow?.value ? String(normRow.value) : ctx.address;
+        const domestic = await epcSearchRows(`/api/domestic/search?postcode=${encodeURIComponent(pc)}`, token);
+        const nonDomestic = await epcSearchRows(`/api/non-domestic/search?postcode=${encodeURIComponent(pc)}`, token);
+        // Score every row against the project address; best score wins.
+        let best: { row: Record<string, unknown>; score: number; register: "domestic" | "non-domestic" } | null = null;
+        for (const row of domestic) {
+          const score = epcAddressScore(projectAddr, row);
+          if (score > (best?.score ?? 0)) best = { row, score, register: "domestic" };
+        }
+        for (const row of nonDomestic) {
+          const score = epcAddressScore(projectAddr, row);
+          if (score > (best?.score ?? 0)) best = { row, score, register: "non-domestic" };
+        }
+        const matched = best && best.score >= 0.7 ? best : null;
+        const matchedAddr = `${String(matched?.row.addressLine1 ?? "")} ${String(matched?.row.addressLine2 ?? "")}`.trim();
+        const note = matched
+          ? `EPC register searched by postcode ${postcode}: ${domestic.length} domestic and ${nonDomestic.length} non-domestic certificate(s) returned; matched "${matchedAddr}" (${matched.register} register, ${String(matched.row.registrationDate ?? "date unknown")}).`
+          : `EPC register searched by postcode ${postcode}: ${domestic.length} domestic and ${nonDomestic.length} non-domestic certificate(s) returned, none matching "${projectAddr}". No EPC evidence from the register — absence is recorded honestly, not as a finding.`;
+        const sourceId = await add("EPC register (MHCLG API)", searchUrl, note, [
+          ["epc_register_checked", "yes", 0.95],
+          ["epc_domestic_count", String(domestic.length), 0.8],
+          ["epc_non_domestic_count", String(nonDomestic.length), 0.8],
+          ["epc_found", matched ? "yes" : "no", 0.9],
+        ]);
+        if (matched) {
+          const rrn = String(matched.row.certificateNumber ?? "");
+          const cert = rrn ? await epcFetchCertificate(rrn, token) : null;
+          const band = String(cert?.current_energy_efficiency_band ?? cert?.asset_rating_band ?? matched.row.currentEnergyEfficiencyBand ?? matched.row.assetRatingBand ?? "").trim();
+          const area = cert?.total_floor_area ?? cert?.total_floor_area_m2;
+          const areaM2 = typeof area === "number" && area > 0 ? String(area) : null;
+          const epcFacts: Array<[string, string, number]> = [];
+          if (areaM2) epcFacts.push(["total_floor_area_m2", areaM2, 0.95]);
+          if (band) epcFacts.push(["epc_rating", band.toUpperCase(), 0.95]);
+          if (rrn) epcFacts.push(["epc_rrn", rrn, 0.95]);
+          if (cert?.registration_date) epcFacts.push(["epc_registration_date", String(cert.registration_date), 0.9]);
+          if (cert?.inspection_date) epcFacts.push(["epc_inspection_date", String(cert.inspection_date), 0.9]);
+          const propType = String(cert?.dwelling_type ?? cert?.property_type ?? matched.row.propertyType ?? "").trim();
+          if (propType && propType !== "0") epcFacts.push(["epc_property_type", propType, 0.85]);
+          if (cert?.uprn !== undefined && cert?.uprn !== null) epcFacts.push(["epc_uprn", String(cert.uprn), 0.9]);
+          const ratingNum = cert?.energy_rating_current ?? cert?.asset_rating_current;
+          if (typeof ratingNum === "number") epcFacts.push(["epc_energy_rating_current", String(ratingNum), 0.9]);
+          epcFacts.push(["epc_register_type", matched.register, 1]);
+          epcFacts.push(["epc_address_matched", "yes", 0.9]);
+          // EPC facts land in category 'epc' under the same source row so the
+          // report's space-evidence row and the feasibility per-m² model can
+          // consume them, exactly like an uploaded EPC would.
+          for (const [key, value, confidence] of epcFacts) {
+            const fact = { category: "epc", key, value, confidence, sourceId };
+            facts.push(fact);
+            await ctx.db`INSERT INTO facts (project_id, category, key, value, confidence, source_id) VALUES (${ctx.projectId}, ${fact.category}, ${key}, ${value}, ${confidence}, ${sourceId})`;
+          }
+        }
+      }
+    } catch (err) { await add("EPC register (MHCLG API)", EPC_API_DOCS, `EPC register check failed: ${err instanceof Error ? err.message : String(err)}. No EPC claim made.`); }
     return { status: "done", output: { note: "Free-source discovery completed; findings are screening evidence and source coverage/absence is recorded explicitly.", facts, sources } };
   },
 };

@@ -217,12 +217,12 @@ function constraintsSection(facts: MemoryFact[], sources: MemorySource[]): strin
   // EPC — floor area drives the per-m² model; absent here (token not configured).
   if (epcArea) {
     flags.push(
-      `<tr><td class="strong">EPC floor area</td><td>${esc(epcArea.value)} m²</td><td>${confPct(epcArea.confidence)}</td><td class="src">${esc(epcArea.source_name ?? "EPC Open Data Communities")}</td></tr>`,
+      `<tr><td class="strong">EPC floor area</td><td>${esc(epcArea.value)} m²</td><td>${confPct(epcArea.confidence)}</td><td class="src">${esc(epcArea.source_name ?? "EPC register")}</td></tr>`,
     );
   } else {
     const epcNote = epcSrc?.notes ? esc(epcSrc.notes) : "EPC data not available for this project.";
     flags.push(
-      `<tr><td class="strong">EPC floor area</td><td><span class="badge-warn">Not available</span><p class="note">${epcNote} Without floor area, per-m² value/cost figures cannot be derived — the financial model uses flat assumption bands instead.</p></td><td>—</td><td class="src">EPC Open Data Communities</td></tr>`,
+      `<tr><td class="strong">EPC floor area</td><td><span class="badge-warn">Not available</span><p class="note">${epcNote} Without floor area, per-m² value/cost figures cannot be derived — the financial model uses flat assumption bands instead.</p></td><td>—</td><td class="src">EPC register</td></tr>`,
     );
   }
 
