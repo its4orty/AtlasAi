@@ -321,7 +321,64 @@ function financialSection(facts: MemoryFact[]): string {
 }
 
 /**
- * Section 5 — concept design ("convert to X"). Rendered only when the design
+ * Section 5 — existing layout (digital twin). Rendered only when the twin step
+ * has run for this project (category "twin" facts exist in memory). Latest
+ * wins: facts accumulate across re-runs, so iterate in id order and overwrite —
+ * the newest as-built model is the one shown. The SVG is inserted as-is: it is
+ * generated server-side by src/twin.ts, not user input.
+ */
+function twinSection(facts: MemoryFact[]): string {
+  const t = new Map<string, MemoryFact>();
+  for (const f of facts) {
+    if (f.category !== "twin") continue;
+    t.set(f.key, f);
+  }
+  if (!t.has("twin_status")) return "";
+  const status = t.get("twin_status")?.value ?? "";
+  const svg = t.get("twin_floor_plan_svg")?.value ?? null;
+  const description = t.get("twin_layout_description")?.value ?? null;
+  const coverage = t.get("twin_data_coverage")?.value ?? null;
+  const roomsRaw = t.get("twin_rooms")?.value ?? null;
+  const totalArea = t.get("twin_total_area_m2")?.value ?? null;
+
+  if (status === "no-space-evidence") {
+    return `<section>
+      <h2><span class="num">5</span>Existing layout (digital twin)</h2>
+      <div class="flag warn">No space evidence in project memory — the as-built model could not be generated. Upload a floor plan or EPC (or enable the EPC register lookup), then re-run the analysis.</div>
+      ${coverage ? `<p class="note">${esc(coverage)}</p>` : ""}
+    </section>`;
+  }
+
+  let roomsHtml = "";
+  if (roomsRaw) {
+    try {
+      const rooms = JSON.parse(roomsRaw) as Array<{ label: string; width_m: number; height_m: number; area_m2: number }>;
+      roomsHtml = evidenceTable(
+        rooms.map((r) => [
+          r.label,
+          `${r.width_m} × ${r.height_m} m · ${r.area_m2} m²`,
+          "—",
+          "document intelligence (labels paired with dimensions in document order)",
+        ]),
+      );
+    } catch {
+      roomsHtml = "";
+    }
+  }
+
+  return `<section>
+    <h2><span class="num">5</span>Existing layout (digital twin)</h2>
+    <p class="lede">The current ("as-built") layout of the property, generated from the confidence-scored space facts in project memory. This is the "before" to the concept design's "after" — it is <strong>indicative, not a surveyed plan</strong>, and it never invents rooms or dimensions that are not in the evidence.</p>
+    ${totalArea ? `<p class="note">Total floor area: ${esc(totalArea)} m².</p>` : ""}
+    ${svg ? `<div class="twin-svg">${svg}</div>` : ""}
+    ${description ? `<p class="note">${esc(description)}</p>` : ""}
+    ${roomsHtml ? `<h3 class="sub">Rooms recorded</h3>${roomsHtml}` : ""}
+    ${coverage ? `<div class="flag"><h3 class="sub">Data coverage</h3><p class="note">${esc(coverage)}</p></div>` : ""}
+  </section>`;
+}
+
+/**
+ * Section 6 — concept design ("convert to X"). Rendered only when the design
  * step has run for this project (design facts exist in memory). The SVG is
  * inserted as-is: it is generated server-side by src/design.ts, not user input.
  */
@@ -374,7 +431,7 @@ function designSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">5</span>Concept design — convert to ${esc(programLabel)}</h2>
+    <h2><span class="num">6</span>Concept design — convert to ${esc(programLabel)}</h2>
     <p class="lede">An indicative zoning concept generated from the space facts in project memory (room dimensions, labels, floor area). It is a screening sketch — <strong>not a professional design, not for construction</strong>, and no planning or statutory compliance has been checked.</p>
     ${totalArea ? `<p class="note">Floor area used: ${esc(totalArea)} m² · allocated to zones: ${esc(allocated ?? "—")} m² · circulation: ${esc(circulation ?? "—")}%${generatedAt ? ` · generated ${fmtDate(generatedAt.slice(0, 10))}` : ""}.</p>` : ""}
     ${svg ? `<div class="design-svg">${svg}</div>` : ""}
@@ -397,7 +454,7 @@ function confidenceSection(facts: MemoryFact[]): string {
     .sort((a, b) => a.confidence - b.confidence);
   if (low.length === 0) {
     return `<section>
-      <h2><span class="num">5</span>Confidence summary</h2>
+      <h2><span class="num">7</span>Confidence summary</h2>
       <p class="lede">No extracted fact carries confidence below 80% — good evidence coverage for this project.</p>
     </section>`;
   }
@@ -406,7 +463,7 @@ function confidenceSection(facts: MemoryFact[]): string {
       `<tr><td class="strong">${esc(f.key)}</td><td>${esc(f.category)}</td><td>${esc(f.value.slice(0, 80))}${f.value.length > 80 ? "…" : ""}</td><td>${confPct(f.confidence)}</td><td class="src">${esc(f.source_name ?? "inferred")}</td></tr>`,
   );
   return `<section>
-    <h2><span class="num">6</span>Confidence summary — needs review</h2>
+    <h2><span class="num">7</span>Confidence summary — needs review</h2>
     <p class="lede">Every fact below carries confidence below 80% and should be treated as needing review before reliance. This includes all assumption-led financial outputs by design.</p>
     <table class="ev">
       <thead><tr><th>Fact</th><th>Category</th><th>Value</th><th>Confidence</th><th>Source</th></tr></thead>
@@ -438,7 +495,7 @@ function reviewSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">7</span>Items requiring professional review</h2>
+    <h2><span class="num">8</span>Items requiring professional review</h2>
     <ul class="review">
       ${items.map((i) => `<li>${i}</li>`).join("")}
       ${items.length === 0 ? "<li>No outstanding professional-review items were identified from the evidence recorded.</li>" : ""}
@@ -496,6 +553,9 @@ ul.review li:before{content:"!";position:absolute;left:14px;top:9px;color:var(--
 /* Concept design */
 .design-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
 .design-svg svg{width:100%;height:auto;display:block}
+/* Digital twin (as-built) */
+.twin-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
+.twin-svg svg{width:100%;height:auto;display:block}
 /* Footer */
 .disclaimer{background:var(--ink);color:#d7d5ce;padding:26px 40px;font-size:12px}
 .disclaimer h3{color:var(--copper-light);font-size:12px;text-transform:uppercase;letter-spacing:.14em;margin:0 0 10px}
@@ -575,6 +635,7 @@ export function renderReportHtml(memory: ProjectMemoryLike): string {
     marketSection(facts),
     constraintsSection(facts, sources),
     financialSection(facts),
+    twinSection(facts),
     designSection(facts),
     confidenceSection(facts),
     reviewSection(facts),

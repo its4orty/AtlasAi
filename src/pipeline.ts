@@ -1,6 +1,7 @@
 import { sql } from "~/db";
 import { ensureSchema, toJson, rowsToJson } from "~/project-schema";
 import { renderReportHtml } from "~/report";
+import { runTwinStep } from "~/twin";
 // pdf-parse v1 (CJS, no exports map — vite interop gives a default export).
 // Import the lib entry directly: index.js has an `isDebugMode = !module.parent`
 // block that reads ./test/data/... and crashes the server at startup under
@@ -24,7 +25,9 @@ import pdfParse from "pdf-parse/lib/pdf-parse.js";
  *   4. intelligence  — REAL: extract structured space facts from uploaded
  *                      documents (floor plans, EPCs) with per-fact confidence
  *   5. feasibility   — REAL: assumption-led financial feasibility model
- *   6. report        — REAL: evidence-backed feasibility report (server-rendered)
+ *   6. compliance    — REAL: change-of-use screening + constraint data gaps
+ *   7. twin          — REAL: as-built "digital twin" of the existing layout
+ *   8. report        — REAL: evidence-backed feasibility report (server-rendered)
  */
 
 type Db = ReturnType<typeof sql>;
@@ -679,6 +682,21 @@ const complianceStep: PipelineStepDef = {
     return { status: 'done', output: { note: 'recorded known constraint data gaps', facts: [fact], sources: [{ name: 'ATLAS AI compliance data-gap register', url: null, notes: 'No new external data queried.' }] } };
   },
 };
+
+/**
+ * REAL step — Phase 1 "digital twin": an as-built spatial model of the EXISTING
+ * property rendered from confidence-scored space facts already in memory
+ * (src/twin.ts). Generates an as-built floor-plan SVG in the same CAD-style
+ * visual language as the concept design, a plain-English layout description and
+ * an honest data-coverage note; writes category "twin" facts. Never invents
+ * rooms or dimensions; footprint-only when only a total floor area exists.
+ */
+const twinStep: PipelineStepDef = {
+  name: "twin",
+  title: "Existing layout (digital twin)",
+  implemented: true,
+  run: async (ctx) => runTwinStep(ctx.db, ctx.projectId),
+};
 const reportStep: PipelineStepDef = {
   name: "report",
   title: "Report generation",
@@ -922,6 +940,7 @@ export const PIPELINE_STEPS: PipelineStepDef[] = [
   intelligenceStep,
   feasibilityStep,
   complianceStep,
+  twinStep,
   reportStep,
 ];
 
