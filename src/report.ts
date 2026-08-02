@@ -389,7 +389,9 @@ function designSection(facts: MemoryFact[]): string {
   // and overwrite — the newest concept is the one shown.
   const d = new Map<string, MemoryFact>();
   for (const f of facts) {
-    if (f.category !== "design") continue;
+    // Imagery facts are stored under category "imagery" but belong to the
+    // design section (the renders of this concept) — include both.
+    if (f.category !== "design" && f.category !== "imagery") continue;
     d.set(f.key, f);
   }
   // Same latest-wins rule for compliance facts: the change-of-use verdict must
