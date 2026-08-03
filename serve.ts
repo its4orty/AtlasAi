@@ -108,10 +108,14 @@ for (let attempt = 1; ; attempt++) {
           if (projectId) {
             const token = new URL(req.url).searchParams.get("token");
             if (projectId !== "17") {
-              if (!token) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
-              await ensureSchema();
-              const rows = await sql()`SELECT 1 FROM projects WHERE id = ${projectId} AND release_token = ${token} LIMIT 1`;
-              if (!rows.length) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+              // Admin test token unlocks any project for owner testing.
+              const isTestToken = !!process.env.TEST_TOKEN && token === process.env.TEST_TOKEN;
+              if (!token || !isTestToken) {
+                if (!token) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+                await ensureSchema();
+                const rows = await sql()`SELECT 1 FROM projects WHERE id = ${projectId} AND release_token = ${token} LIMIT 1`;
+                if (!rows.length) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+              }
             }
             const runtimeFile = Bun.file(`${import.meta.dir}/public${pathname}`);
             if (await runtimeFile.exists()) {

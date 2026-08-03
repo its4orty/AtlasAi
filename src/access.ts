@@ -5,6 +5,8 @@ export const BUY_URL = "https://buy.stripe.com/aFa00j3gC94j9fkbAt9Ve01";
 export async function canViewProject(projectId: string, token?: string | null): Promise<boolean> {
   if (projectId === DEMO_PROJECT_ID) return true;
   if (!token) return false;
+  // Admin test token: unlocks any project for owner testing (no charge).
+  if (process.env.TEST_TOKEN && token === process.env.TEST_TOKEN) return true;
   await ensureSchema();
   const rows = await sql()`SELECT 1 FROM projects WHERE id = ${projectId} AND release_token = ${token} LIMIT 1`;
   return rows.length > 0;
