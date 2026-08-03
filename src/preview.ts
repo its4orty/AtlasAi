@@ -100,6 +100,10 @@ function teaserItems(memory: ProjectMemoryLike): string[] {
   if (postcode) items.push(`Postcode: ${esc(postcode)}`);
   const localAuthority = discovery.get("local_authority");
   if (localAuthority) items.push(`Local authority: ${esc(localAuthority)}`);
+  const nearbyCount = Number(latest("nearby", memory.facts).get("nearby_count"));
+  if (Number.isFinite(nearbyCount) && nearbyCount > 0) {
+    items.push(`Nearby opportunities: ${nearbyCount} sites/premises within 1.5 km flagged — unlock the full report to see them.`);
+  }
   return items;
 }
 

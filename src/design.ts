@@ -5,6 +5,7 @@ import { renderAxonometric } from "~/axo";
 import { designInputHash, llmProviderLabel, requestGemini, type LlmDesign } from "~/llm";
 import { buildRenderPrompts, requestImage, saveRender, imageryPromptVersion } from "~/imagery";
 import { fetchStreetViewFacts } from "~/streetview";
+import { reverseGeocodePostcode, runNearbyScan } from "~/nearby";
 
 /**
  * ATLAS AI — concept design generation (Phase 1).
@@ -653,8 +654,37 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
     // section — the design step never blocks on street view.
     imageryFacts.push(...(await fetchStreetViewFacts(String(proj.address), projectId, sourceId)));
 
+    // Nearby opportunities scan (open-data CANDIDATES, never verified vacancy).
+    // Uses the project's stored coordinates (discovery step; streetview geocode
+    // as fallback) and stored postcode (reverse-geocoded when absent) with the
+    // floor area computed above. Never blocks or throws — on missing inputs or
+    // provider failure it records honest nearby_status=failed facts.
+    const discoveryLat = factsAll.find((f) => f.category === "discovery" && f.key === "latitude");
+    const discoveryLon = factsAll.find((f) => f.category === "discovery" && f.key === "longitude");
+    const streetLat = factsAll.find((f) => f.category === "imagery" && f.key === "imagery_streetview_lat");
+    const streetLon = factsAll.find((f) => f.category === "imagery" && f.key === "imagery_streetview_lon");
+    const latFact = discoveryLat ?? streetLat;
+    const lonFact = discoveryLon ?? streetLon;
+    const lat = latFact ? Number.parseFloat(latFact.value) : null;
+    const lon = lonFact ? Number.parseFloat(lonFact.value) : null;
+    let nearbyPostcode = factsAll.find((f) => f.category === "address" && f.key === "postcode")?.value ?? null;
+    if (!nearbyPostcode && lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
+      nearbyPostcode = (await reverseGeocodePostcode(lat, lon)) ?? null;
+    }
+    const nearbyAreaM2 = totalArea > 0 ? totalArea : allocatedM2 > 0 ? allocatedM2 : null;
+    const nearbyFacts = await runNearbyScan({
+      postcode: nearbyPostcode,
+      lat,
+      lon,
+      floorAreaM2: nearbyAreaM2,
+      targetUse,
+      sourceId,
+      generatedAt,
+    });
+
     const factOuts: Array<{ category: string; key: string; value: string; confidence: number; sourceId: string | null }> = [
       ...imageryFacts,
+      ...nearbyFacts,
       { category: "design", key: "design_target_use", value: targetUse, confidence: 0.95, sourceId },
       { category: "design", key: "design_program_label", value: program.label, confidence: 0.9, sourceId },
       { category: "design", key: "design_status", value: llmDesign ? "generated_llm" : "generated_deterministic", confidence: 1, sourceId },
