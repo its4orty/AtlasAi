@@ -11,6 +11,7 @@
 import handler from "./dist/server/server.js";
 import { sql } from "./src/db";
 import { ensureSchema } from "./src/project-schema";
+import { getPreviewImageBytes } from "./src/preview-image";
 
 // Pinned, NOT read from the environment. The published preview URL
 // (<label>.<PUBLIC_SITE_DOMAIN>) is reverse-proxied to 0.0.0.0:3000 inside the
@@ -72,6 +73,58 @@ for (let attempt = 1; ; attempt++) {
       hostname: HOST,
       async fetch(req) {
         const { pathname } = new URL(req.url);
+        // Project renders are handled EXCLUSIVELY here — never by the generic
+        // static branch below. vite copies public/ into dist/client at build
+        // time, so the clean full-res files would otherwise be served with no
+        // token check at all. This block always returns (or 404s) for every
+        // /project-images/ request: full-res clean files require the release
+        // token (demo project 17 stays public); <view>.preview.* variants are
+        // token-free but always downscaled + watermarked copies.
+        if (pathname.startsWith("/project-images/")) {
+          const match = pathname.match(/^\/project-images\/(\d+)\/([^/]+)\.(?:jpg|jpeg|png|webp)$/i);
+          const projectId = match?.[1];
+          const fileName = match?.[2] ?? "";
+          const fileExt = pathname.split(".").pop()?.toLowerCase() ?? "";
+          // Public preview variant (`<view>.preview.jpg`): served WITHOUT a
+          // token, but always a downscaled + watermarked copy generated from
+          // the stored render — never the full-resolution clean file, which
+          // remains token-gated below. Used by the /report/$id preview page.
+          if (projectId && /\.preview$/i.test(fileName)) {
+            const preview = await getPreviewImageBytes(
+              projectId,
+              fileName.replace(/\.preview$/i, ""),
+              fileExt,
+            );
+            if (preview) {
+              return new Response(preview.bytes, {
+                headers: {
+                  "Content-Type": preview.mime,
+                  "Cache-Control": "public, max-age=3600",
+                },
+              });
+            }
+            return new Response("preview unavailable", { status: 404 });
+          }
+          if (projectId) {
+            const token = new URL(req.url).searchParams.get("token");
+            if (projectId !== "17") {
+              if (!token) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+              await ensureSchema();
+              const rows = await sql()`SELECT 1 FROM projects WHERE id = ${projectId} AND release_token = ${token} LIMIT 1`;
+              if (!rows.length) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
+            }
+            const runtimeFile = Bun.file(`${import.meta.dir}/public${pathname}`);
+            if (await runtimeFile.exists()) {
+              const mime =
+                (STATIC_MIME as Record<string, string>)[fileExt] ??
+                "application/octet-stream";
+              return new Response(runtimeFile, {
+                headers: { "Content-Type": mime },
+              });
+            }
+          }
+          return new Response("not found", { status: 404 });
+        }
         if (pathname !== "/") {
           const file = Bun.file(CLIENT_DIR + pathname);
           if (await file.exists()) {
@@ -82,31 +135,6 @@ for (let attempt = 1; ; attempt++) {
               (STATIC_MIME as Record<string, string>)[ext] ??
               "application/octet-stream";
             return new Response(file, { headers: { "Content-Type": mime } });
-          }
-
-          // Runtime-generated project renders are written under public/ after
-          // the build, so they are not present in dist/client. Only expose the
-          // project-scoped render path; absent files continue to SSR as before.
-          if (pathname.startsWith("/project-images/")) {
-            const match = pathname.match(/^\/project-images\/(\d+)\/[^/]+\.(?:jpg|jpeg|png|webp)$/i);
-            const projectId = match?.[1];
-            const token = new URL(req.url).searchParams.get("token");
-            if (projectId && projectId !== "17") {
-              if (!token) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
-              await ensureSchema();
-              const rows = await sql()`SELECT 1 FROM projects WHERE id = ${projectId} AND release_token = ${token} LIMIT 1`;
-              if (!rows.length) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
-            }
-            const runtimeFile = Bun.file(`${import.meta.dir}/public${pathname}`);
-            if (await runtimeFile.exists()) {
-              const ext = pathname.split(".").pop()?.toLowerCase() ?? "";
-              const mime =
-                (STATIC_MIME as Record<string, string>)[ext] ??
-                "application/octet-stream";
-              return new Response(runtimeFile, {
-                headers: { "Content-Type": mime },
-              });
-            }
           }
         }
         return (
