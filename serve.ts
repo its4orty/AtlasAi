@@ -11,6 +11,7 @@
 import handler from "./dist/server/server.js";
 import { sql } from "./src/db";
 import { ensureSchema } from "./src/project-schema";
+import { getPreviewImageBytes } from "./src/preview-image";
 
 // Pinned, NOT read from the environment. The published preview URL
 // (<label>.<PUBLIC_SITE_DOMAIN>) is reverse-proxied to 0.0.0.0:3000 inside the
@@ -88,8 +89,30 @@ for (let attempt = 1; ; attempt++) {
           // the build, so they are not present in dist/client. Only expose the
           // project-scoped render path; absent files continue to SSR as before.
           if (pathname.startsWith("/project-images/")) {
-            const match = pathname.match(/^\/project-images\/(\d+)\/[^/]+\.(?:jpg|jpeg|png|webp)$/i);
+            const match = pathname.match(/^\/project-images\/(\d+)\/([^/]+)\.(?:jpg|jpeg|png|webp)$/i);
             const projectId = match?.[1];
+            const fileName = match?.[2] ?? "";
+            const fileExt = pathname.split(".").pop()?.toLowerCase() ?? "";
+            // Public preview variant (`<view>.preview.jpg`): served WITHOUT a
+            // token, but always a downscaled + watermarked copy generated from
+            // the stored render — never the full-resolution clean file, which
+            // remains token-gated below. Used by the /report/$id preview page.
+            if (projectId && /\.preview$/i.test(fileName)) {
+              const preview = await getPreviewImageBytes(
+                projectId,
+                fileName.replace(/\.preview$/i, ""),
+                fileExt,
+              );
+              if (preview) {
+                return new Response(preview.bytes, {
+                  headers: {
+                    "Content-Type": preview.mime,
+                    "Cache-Control": "public, max-age=3600",
+                  },
+                });
+              }
+              return new Response("preview unavailable", { status: 404 });
+            }
             const token = new URL(req.url).searchParams.get("token");
             if (projectId && projectId !== "17") {
               if (!token) return Response.json({ error: "This report is locked — purchase to unlock" }, { status: 403 });
