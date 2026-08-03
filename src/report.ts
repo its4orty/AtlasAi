@@ -479,13 +479,49 @@ function complianceBlock(c: Map<string, MemoryFact>): string {
   const title = permission === "no" ? "No change-of-use permission required (screening)" : permission === "yes" ? "Change-of-use permission likely required (screening)" : "Change-of-use verdict unknown";
   return `<div class="flag ${permission === "no" ? "" : "warn"}"><h3 class="sub">Change of use</h3><p><strong>${esc(title)}</strong></p><p>${esc(note.value)}</p><p class="note">Confidence: ${confPct(note.confidence)}. This is an England Use Classes Order screening, not a planning determination.</p></div>`;
 }
+const fmtDist = (d: number): string => (d >= 1000 ? `${(d / 1000).toFixed(1)} km` : `${Math.round(d)} m`);
+function nearbySection(facts: MemoryFact[]): string {
+  const byKey = factMap(facts).get("nearby");
+  if (!byKey) return "";
+  const countRaw = byKey.get("nearby_count")?.value;
+  const n = countRaw ? Number.parseInt(countRaw, 10) : 0;
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const targetUse = factMap(facts).get("design")?.get("design_target_use")?.value;
+  const rows: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const kind = byKey.get(`nearby_${i}_kind`)?.value;
+    if (!kind) continue;
+    const name = byKey.get(`nearby_${i}_name`)?.value ?? "—";
+    const sizeRaw = Number.parseFloat(byKey.get(`nearby_${i}_size_m2`)?.value ?? "");
+    const distRaw = Number.parseFloat(byKey.get(`nearby_${i}_distance_m`)?.value ?? "");
+    const size = Number.isFinite(sizeRaw) && sizeRaw > 0 ? `${esc(String(sizeRaw))} m²` : "—";
+    const dist = Number.isFinite(distRaw) && distRaw >= 0 ? fmtDist(distRaw) : "—";
+    const source = byKey.get(`nearby_${i}_source`)?.value ?? "";
+    const confRaw = Number.parseFloat(byKey.get(`nearby_${i}_confidence`)?.value ?? "");
+    const conf = Number.isFinite(confRaw) ? confPct(confRaw) : "—";
+    const badge = kind === "site"
+      ? `<span class="badge-nearby site">SITE</span>`
+      : `<span class="badge-nearby prem">PREMISES</span>`;
+    rows.push(`<tr><td>${badge}<span class="strong"> ${esc(name)}</span></td><td>${size}</td><td>${dist}</td><td class="src">${esc(source)}</td><td>${conf}</td></tr>`);
+  }
+  if (rows.length === 0) return "";
+  return `<section>
+    <h2><span class="num">8</span>Nearby opportunities</h2>
+    <p class="lede">Candidate buildings and development sites near this project that could plausibly accommodate the same target use${targetUse ? ` (convert to ${esc(targetUse)})` : ""}. These are open-data flags, not verified vacancies.</p>
+    <table class="ev">
+      <thead><tr><th>Candidate</th><th>Size</th><th>Distance</th><th>Source</th><th>Confidence</th></tr></thead>
+      <tbody>${rows.join("")}</tbody>
+    </table>
+    <p class="note caveat">Candidates flagged from open data (OSM/EPC). Availability and vacancy are NOT verified — confirm with the local authority, agents and the landowner.</p>
+  </section>`;
+}
 function confidenceSection(facts: MemoryFact[]): string {
   const low = facts
     .filter((f) => f.confidence < 0.8)
     .sort((a, b) => a.confidence - b.confidence);
   if (low.length === 0) {
     return `<section>
-      <h2><span class="num">8</span>Confidence summary</h2>
+      <h2><span class="num">9</span>Confidence summary</h2>
       <p class="lede">No extracted fact carries confidence below 80% — good evidence coverage for this project.</p>
     </section>`;
   }
@@ -494,7 +530,7 @@ function confidenceSection(facts: MemoryFact[]): string {
       `<tr><td class="strong">${esc(f.key)}</td><td>${esc(f.category)}</td><td>${esc(f.value.slice(0, 80))}${f.value.length > 80 ? "…" : ""}</td><td>${confPct(f.confidence)}</td><td class="src">${esc(f.source_name ?? "inferred")}</td></tr>`,
   );
   return `<section>
-    <h2><span class="num">8</span>Confidence summary — needs review</h2>
+    <h2><span class="num">9</span>Confidence summary — needs review</h2>
     <p class="lede">Every fact below carries confidence below 80% and should be treated as needing review before reliance. This includes all assumption-led financial outputs by design.</p>
     <table class="ev">
       <thead><tr><th>Fact</th><th>Category</th><th>Value</th><th>Confidence</th><th>Source</th></tr></thead>
@@ -526,7 +562,7 @@ function reviewSection(facts: MemoryFact[]): string {
   }
 
   return `<section>
-    <h2><span class="num">9</span>Items requiring professional review</h2>
+    <h2><span class="num">10</span>Items requiring professional review</h2>
     <ul class="review">
       ${items.map((i) => `<li>${i}</li>`).join("")}
       ${items.length === 0 ? "<li>No outstanding professional-review items were identified from the evidence recorded.</li>" : ""}
@@ -576,6 +612,9 @@ table.ev td.src{font-size:11px;color:var(--slate)}
 .flag{border:1px solid;padding:14px 16px;font-size:13px;margin:6px 0 18px}
 .flag.warn{background:var(--warn-bg);border-color:var(--warn-line);color:#7a4e14}
 .badge-warn{display:inline-block;background:var(--warn-bg);border:1px solid var(--warn-line);color:#8a5a1e;font:700 10px Manrope;text-transform:uppercase;letter-spacing:.1em;padding:3px 8px;white-space:nowrap}
+.badge-nearby{display:inline-block;font:700 9px Manrope;text-transform:uppercase;letter-spacing:.08em;padding:2px 7px;white-space:nowrap;vertical-align:middle;border-radius:3px}
+.badge-nearby.site{background:#e8efec;border:1px solid #9db8ab;color:#2e5c46}
+.badge-nearby.prem{background:#efe8f4;border:1px solid #bda3cc;color:#5b3a73}
 tr.flag-row td{background:#fdfaf4}
 ul.review{padding:0;margin:12px 0 0;list-style:none}
 ul.review li{padding:11px 14px 11px 40px;background:#fff;border:1px solid var(--line);border-top:0;font-size:13.5px;position:relative}
@@ -673,6 +712,7 @@ export function renderReportHtml(memory: ProjectMemoryLike): string {
     streetViewSection(facts),
     twinSection(facts),
     designSection(facts),
+    nearbySection(facts),
     confidenceSection(facts),
     reviewSection(facts),
     disclaimer,
