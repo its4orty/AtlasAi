@@ -224,6 +224,8 @@ export interface NearbyPremisesItem {
   type: string | null;
   distance_m: number | null;
   source: string;
+  lat?: number | null;
+  lon?: number | null;
 }
 
 interface EpcSummaryRow {
@@ -343,8 +345,9 @@ export async function fetchNearbyPremises(
       if (c.floorArea < minM2 || c.floorArea > maxM2) continue;
       const certPostcode = c.postcode ?? pool[i + j].postcode ?? postcode;
       let distance_m: number | null = null;
+      let point: { lat: number; lon: number } | null = null;
       if (certPostcode) {
-        const point = certPostcode.replace(/\s+/g, "").toUpperCase() === postcode.replace(/\s+/g, "").toUpperCase()
+        point = certPostcode.replace(/\s+/g, "").toUpperCase() === postcode.replace(/\s+/g, "").toUpperCase()
           ? origin
           : await postcodeCentroid(certPostcode);
         if (point) distance_m = haversineM(origin.lat, origin.lon, point.lat, point.lon);
@@ -355,6 +358,8 @@ export async function fetchNearbyPremises(
         type: c.propertyType,
         distance_m,
         source: EPC_REGISTER_SOURCE,
+        lat: point?.lat ?? null,
+        lon: point?.lon ?? null,
       });
     }
   }
@@ -380,6 +385,8 @@ export interface NearbyOpportunity {
   source: string;
   confidence: number;
   note: string;
+  lat?: number | null;
+  lon?: number | null;
 }
 
 /** Best-effort use class derived from a free-text description / OSM tags. */
@@ -478,6 +485,8 @@ export async function combine(
       source: s.source,
       confidence: 0.6, // community-maintained OSM tags; vacancy unverified
       note: siteNote(s, targetClass),
+      lat: s.lat,
+      lon: s.lon,
     });
   }
   for (const p of premises) {
@@ -491,6 +500,8 @@ export async function combine(
       source: p.source,
       confidence: 0.7, // register floor area is solid, but vacancy unverified
       note: premisesNote(p, targetClass),
+      lat: p.lat,
+      lon: p.lon,
     });
   }
 
@@ -532,6 +543,8 @@ export function buildNearbyFacts(opportunities: NearbyOpportunity[], ctx: Nearby
       { category: "nearby", key: `nearby_${i}_source`, value: o.source, confidence: o.confidence, sourceId: ctx.sourceId },
       { category: "nearby", key: `nearby_${i}_confidence`, value: String(o.confidence), confidence: 1, sourceId: ctx.sourceId },
       { category: "nearby", key: `nearby_${i}_note`, value: o.note, confidence: o.confidence, sourceId: ctx.sourceId },
+      { category: "nearby", key: `nearby_${i}_lat`, value: o.lat != null ? String(o.lat) : "", confidence: o.confidence, sourceId: ctx.sourceId },
+      { category: "nearby", key: `nearby_${i}_lon`, value: o.lon != null ? String(o.lon) : "", confidence: o.confidence, sourceId: ctx.sourceId },
     );
   });
   return facts;

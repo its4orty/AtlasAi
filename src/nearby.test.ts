@@ -9,7 +9,7 @@ import {
   runNearbyScan,
   type NearbyOpportunity,
 } from "./nearby";
-import { renderReportHtml, type ProjectMemoryLike } from "./report";
+import { renderReportHtml, serializeNearbyMapData, type ProjectMemoryLike } from "./report";
 import { renderPreviewHtml } from "./preview";
 
 const originalFetch = globalThis.fetch;
@@ -269,6 +269,24 @@ describe("runNearbyScan / buildNearbyFacts", () => {
 });
 
 describe("report + preview integration", () => {
+  test("serializes privacy-safe map pins with coordinates and caveat", () => {
+    const data = serializeNearbyMapData(memory([
+      ["discovery", "latitude", "51.372"], ["discovery", "longitude", "-0.115"],
+      ["nearby", "nearby_count", "1"], ["nearby", "nearby_0_kind", "site"], ["nearby", "nearby_0_name", "Open Site"],
+      ["nearby", "nearby_0_size_m2", "120"], ["nearby", "nearby_0_distance_m", "250"], ["nearby", "nearby_0_source", "OSM"],
+      ["nearby", "nearby_0_lat", "51.373"], ["nearby", "nearby_0_lon", "-0.116"],
+    ]).facts);
+    expect(data.pins).toEqual([{ name: "Open Site", kind: "site", size: "120 m²", distance: "250 m", source: "OSM", lat: 51.373, lon: -0.116 }]);
+    expect(data.center).toEqual({ lat: 51.372, lon: -0.115 });
+    expect(data.caveat).toContain("open-data candidate — vacancy not verified");
+  });
+  test("report contains map enhancement and serialized pins for a synthetic candidate", () => {
+    const html = renderReportHtml(memory([
+      ["nearby", "nearby_count", "1"], ["nearby", "nearby_0_kind", "site"], ["nearby", "nearby_0_name", "Synthetic Site"],
+      ["nearby", "nearby_0_lat", "51.373"], ["nearby", "nearby_0_lon", "-0.116"], ["nearby", "nearby_0_source", "OSM"],
+    ]));
+    expect(html).toContain('id="nearby-map"'); expect(html).toContain('"lat":51.373'); expect(html).toContain("open-data candidate — vacancy not verified");
+  });
   test("report renders the Nearby opportunities section with the honest caveat", () => {
     const html = renderReportHtml(memory([
       ["design", "design_target_use", "gym"],

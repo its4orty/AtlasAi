@@ -480,11 +480,49 @@ function complianceBlock(c: Map<string, MemoryFact>): string {
   return `<div class="flag ${permission === "no" ? "" : "warn"}"><h3 class="sub">Change of use</h3><p><strong>${esc(title)}</strong></p><p>${esc(note.value)}</p><p class="note">Confidence: ${confPct(note.confidence)}. This is an England Use Classes Order screening, not a planning determination.</p></div>`;
 }
 const fmtDist = (d: number): string => (d >= 1000 ? `${(d / 1000).toFixed(1)} km` : `${Math.round(d)} m`);
+
+export const NEARBY_CAVEAT = "open-data candidate — vacancy not verified";
+export interface NearbyMapPin {
+  name: string;
+  kind: string;
+  size: string | null;
+  distance: string | null;
+  source: string;
+  lat: number;
+  lon: number;
+}
+
+/** Serialize only non-sensitive nearby facts for the progressive map enhancement. */
+export function serializeNearbyMapData(facts: MemoryFact[]): { pins: NearbyMapPin[]; center: { lat: number; lon: number } | null; caveat: string } {
+  const byKey = factMap(facts).get("nearby");
+  const count = Number.parseInt(byKey?.get("nearby_count")?.value ?? "0", 10);
+  const pins: NearbyMapPin[] = [];
+  for (let i = 0; i < (Number.isFinite(count) ? count : 0); i++) {
+    const lat = Number.parseFloat(byKey?.get(`nearby_${i}_lat`)?.value ?? "");
+    const lon = Number.parseFloat(byKey?.get(`nearby_${i}_lon`)?.value ?? "");
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const size = Number.parseFloat(byKey?.get(`nearby_${i}_size_m2`)?.value ?? "");
+    const distance = Number.parseFloat(byKey?.get(`nearby_${i}_distance_m`)?.value ?? "");
+    pins.push({
+      name: byKey?.get(`nearby_${i}_name`)?.value ?? "—",
+      kind: byKey?.get(`nearby_${i}_kind`)?.value ?? "candidate",
+      size: Number.isFinite(size) && size > 0 ? `${size} m²` : null,
+      distance: Number.isFinite(distance) && distance >= 0 ? fmtDist(distance) : null,
+      source: byKey?.get(`nearby_${i}_source`)?.value ?? "",
+      lat, lon,
+    });
+  }
+  const address = factMap(facts).get("address");
+  const discovery = factMap(facts).get("discovery");
+  const lat = Number.parseFloat(discovery?.get("latitude")?.value ?? address?.get("latitude")?.value ?? address?.get("lat")?.value ?? "");
+  const lon = Number.parseFloat(discovery?.get("longitude")?.value ?? address?.get("longitude")?.value ?? address?.get("lon")?.value ?? "");
+  return { pins, center: Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null, caveat: NEARBY_CAVEAT };
+}
+
 function nearbySection(facts: MemoryFact[]): string {
   const byKey = factMap(facts).get("nearby");
   if (!byKey) return "";
-  const countRaw = byKey.get("nearby_count")?.value;
-  const n = countRaw ? Number.parseInt(countRaw, 10) : 0;
+  const n = Number.parseInt(byKey.get("nearby_count")?.value ?? "0", 10);
   if (!Number.isFinite(n) || n <= 0) return "";
   const targetUse = factMap(facts).get("design")?.get("design_target_use")?.value;
   const rows: string[] = [];
@@ -499,20 +537,21 @@ function nearbySection(facts: MemoryFact[]): string {
     const source = byKey.get(`nearby_${i}_source`)?.value ?? "";
     const confRaw = Number.parseFloat(byKey.get(`nearby_${i}_confidence`)?.value ?? "");
     const conf = Number.isFinite(confRaw) ? confPct(confRaw) : "—";
-    const badge = kind === "site"
-      ? `<span class="badge-nearby site">SITE</span>`
-      : `<span class="badge-nearby prem">PREMISES</span>`;
+    const badge = kind === "site" ? `<span class="badge-nearby site">SITE</span>` : `<span class="badge-nearby prem">PREMISES</span>`;
     rows.push(`<tr><td>${badge}<span class="strong"> ${esc(name)}</span></td><td>${size}</td><td>${dist}</td><td class="src">${esc(source)}</td><td>${conf}</td></tr>`);
   }
   if (rows.length === 0) return "";
+  const mapData = serializeNearbyMapData(facts);
+  const json = JSON.stringify(mapData).replace(/<\//g, "<\\/");
+  const center = mapData.center ? `map.setView([${mapData.center.lat}, ${mapData.center.lon}], 14);` : "";
   return `<section>
-    <h2><span class="num">8</span>Nearby opportunities</h2>
-    <p class="lede">Candidate buildings and development sites near this project that could plausibly accommodate the same target use${targetUse ? ` (convert to ${esc(targetUse)})` : ""}. These are open-data flags, not verified vacancies.</p>
-    <table class="ev">
-      <thead><tr><th>Candidate</th><th>Size</th><th>Distance</th><th>Source</th><th>Confidence</th></tr></thead>
-      <tbody>${rows.join("")}</tbody>
-    </table>
-    <p class="note caveat">Candidates flagged from open data (OSM/EPC). Availability and vacancy are NOT verified — confirm with the local authority, agents and the landowner.</p>
+    <h2><span class="num">8</span>Nearby opportunities — ${NEARBY_CAVEAT}</h2>
+    <p class="lede">Candidate buildings and development sites near this project that could plausibly accommodate the same target use${targetUse ? ` (convert to ${esc(targetUse)})` : ""}. <strong>${NEARBY_CAVEAT}</strong>; availability is not established.</p>
+    <div class="nearby-map-wrap"><div id="nearby-map" class="nearby-map" role="img" aria-label="Map of nearby open-data candidates"></div><p id="nearby-map-fallback" class="note">Map enhancement unavailable; the candidate list below remains the source of record.</p></div>
+    <script type="application/json" id="nearby-map-data">${json}</script>
+    <table class="ev"><thead><tr><th>Candidate</th><th>Size</th><th>Distance</th><th>Source</th><th>Confidence</th></tr></thead><tbody>${rows.join("")}</tbody></table>
+    <p class="note caveat">${NEARBY_CAVEAT}. Candidates flagged from open data (OSM/EPC). Availability and vacancy are NOT verified — confirm with the local authority, agents and the landowner.</p>
+    <script>(function(){var el=document.getElementById('nearby-map'),data=document.getElementById('nearby-map-data'),fallback=document.getElementById('nearby-map-fallback');if(!el||!data)return;function init(){if(!window.L)return;try{var d=JSON.parse(data.textContent||'{}'),m=L.map(el),bounds=[];L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(m);d.pins.forEach(function(p){var marker=L.marker([p.lat,p.lon]).addTo(m);bounds.push([p.lat,p.lon]);marker.bindPopup('<strong>'+p.name.replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})+'</strong><br>'+p.kind+(p.size?'<br>'+p.size:'')+(p.distance?'<br>'+p.distance:'')+'<br>'+p.source+'<br><em>'+d.caveat+'</em>')});if(d.center)bounds.push([d.center.lat,d.center.lon]);if(bounds.length)m.fitBounds(bounds,{padding:[24,24],maxZoom:15});else ${center}fallback.style.display='none'}catch(e){}}var t=setInterval(function(){if(window.L){clearInterval(t);init()}},50);setTimeout(function(){clearInterval(t);if(!window.L)fallback.style.display='block'},4000)})();</script>
   </section>`;
 }
 function confidenceSection(facts: MemoryFact[]): string {
@@ -597,6 +636,7 @@ a{color:var(--ink)}
 section{margin:0 0 40px}
 h2{font-size:24px;display:flex;align-items:baseline;gap:12px;border-bottom:2px solid var(--ink);padding-bottom:10px}
 h2 .num{color:var(--copper);font-size:13px;letter-spacing:0}
+.nearby-map-wrap{margin:14px 0;background:#fff;border:1px solid var(--line);padding:10px}.nearby-map{height:380px;background:#e8e4da}.nearby-map-wrap .note{margin:8px 2px}.leaflet-container{font:12px Manrope,sans-serif}
 h3.sub{font-size:14px;text-transform:uppercase;letter-spacing:.12em;color:var(--slate);margin:26px 0 10px}
 .lede{color:var(--slate);font-size:13.5px;max-width:760px;margin:12px 0 18px}
 .note{font-size:12px;color:var(--slate);margin:6px 0 0;max-width:520px}
@@ -657,6 +697,8 @@ function documentShell(address: string, inner: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>ATLAS AI — Feasibility screening · ${esc(address)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@600;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <style>${REPORT_CSS}</style>
