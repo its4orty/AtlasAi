@@ -109,6 +109,14 @@ function evidenceTable(rows: Array<[string, string, string, string]>): string {
 /* Section builders                                                    */
 /* ------------------------------------------------------------------ */
 
+function confirmationSection(memory: ProjectMemoryLike): string {
+  const c = factMap(memory.facts).get("confirmation");
+  const decision = (memory.decisions as any[]).find((d) => d?.step === "confirm");
+  if (!decision && !c) return "";
+  const coords = [c?.get("coords_lat")?.value, c?.get("coords_lon")?.value].filter(Boolean).join(", ");
+  return `<section><h2><span class="num">0</span>Property confirmation</h2><p class="lede">Client decision: <strong>${esc(decision?.choice ?? "confirmed")}</strong>. Coordinates source: ${esc(c?.get("coords_source")?.value ?? "client-confirmed")}${coords ? ` (${esc(coords)})` : ""}.</p><p class="note">The client confirmed this property reference before design generation. Street View is a live Google preview, not an image owned by ATLAS AI.</p></section>`;
+}
+
 function sourcesSection(memory: ProjectMemoryLike): string {
   const sources = memory.sources;
   const rows = sources.map((s) => {
@@ -747,6 +755,7 @@ export function renderReportHtml(memory: ProjectMemoryLike): string {
 
   const inner = [
     masthead,
+    confirmationSection(memory),
     sourcesSection(memory),
     marketSection(facts),
     constraintsSection(facts, sources),
