@@ -33,6 +33,7 @@ describe("buildRenderPrompts", () => {
       expect(count).toBeLessThanOrEqual(180);
       expect(result.prompt).not.toContain("London Road");
       expect(result.prompt).not.toContain("CR0");
+      expect(result.prompt.length).toBeLessThan(1000);
       expect(result.prompt.toLowerCase()).toContain("barber");
       expect(result.prompt.startsWith("Photorealistic architectural visualization")).toBe(true);
     }
@@ -65,6 +66,7 @@ describe("buildRenderPrompts", () => {
     const interior = prompts.find((p) => p.view === "interior")!;
     expect(interior.prompt).toContain("designed layout");
     expect(interior.prompt).toContain("listed zones");
+    expect(interior.prompt.length).toBeLessThan(1000);
     // Changing the designed layout must change the cache hash so renders regenerate.
     const different = buildRenderPrompts(
       [{ key: "address", value: "78 Godson Road, Croydon CR0 2TA", confidence: 1 }],
@@ -115,7 +117,7 @@ describe("requestImage", () => {
     };
 
     const result = await requestImage("a safe prompt", "interior");
-    expect(result).toMatchObject({ provider: "pollinations", model: "flux", mime: "image/jpeg" });
+    expect(result).toMatchObject({ provider: "pollinations", model: "default", mime: "image/jpeg" });
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain("https://image.pollinations.ai/prompt/");
   });
