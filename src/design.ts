@@ -640,13 +640,17 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
     };
     const imageToken = process.env.CLOUDFLARE_API_TOKEN?.trim() && process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
     if (!imageToken || imageToken.startsWith("your-")) imageryFacts.push({ category: "imagery", key: "imagery_status", value: "skipped", confidence: 1, sourceId });
-    else for (const p of buildRenderPrompts(factsAll.map(f => ({ key: f.key, value: f.value, confidence: Number(f.confidence) })), targetUse, designContext).slice(0, 2)) {
-      const [cachedImage] = await db`SELECT value FROM facts WHERE project_id = ${projectId} AND category = 'imagery' AND key = ${`imagery_${p.view}_prompt_hash`} AND value = ${p.hash} ORDER BY id DESC LIMIT 1`;
-      if (cachedImage) continue;
-      const result = await requestImage(p.prompt, p.view);
-      if (!result) { imageryFacts.push({ category: "imagery", key: `imagery_${p.view}_status`, value: "failed", confidence: 1, sourceId }); continue; }
-      const url = await saveRender(projectId, p.view, result);
-      for (const [key, value] of [[`imagery_${p.view}_status`, "generated"], [`imagery_${p.view}_url`, url], [`imagery_${p.view}_prompt_hash`, p.hash], [`imagery_${p.view}_provider`, result.provider], [`imagery_${p.view}_model`, result.model], [`imagery_${p.view}_prompt_version`, imageryPromptVersion], [`imagery_${p.view}_target_use`, targetUse], [`imagery_${p.view}_generated_at`, generatedAt], [`imagery_${p.view}_mime`, result.mime]] as [string, string][]) imageryFacts.push({ category: "imagery", key, value, confidence: 1, sourceId });
+    else {
+      const prompts = buildRenderPrompts(factsAll.map(f => ({ key: f.key, value: f.value, confidence: Number(f.confidence) })), targetUse, designContext).slice(0, 2);
+      const imageryWork = prompts.map(async (p) => {
+        const [cachedImage] = await db`SELECT value FROM facts WHERE project_id = ${projectId} AND category = 'imagery' AND key = ${`imagery_${p.view}_prompt_hash`} AND value = ${p.hash} ORDER BY id DESC LIMIT 1`;
+        if (cachedImage) return;
+        const result = await requestImage(p.prompt, p.view);
+        if (!result) { imageryFacts.push({ category: "imagery", key: `imagery_${p.view}_status`, value: "failed", confidence: 1, sourceId }); return; }
+        const url = await saveRender(projectId, p.view, result);
+        for (const [key, value] of [[`imagery_${p.view}_status`, "generated"], [`imagery_${p.view}_url`, url], [`imagery_${p.view}_prompt_hash`, p.hash], [`imagery_${p.view}_provider`, result.provider], [`imagery_${p.view}_model`, result.model], [`imagery_${p.view}_prompt_version`, imageryPromptVersion], [`imagery_${p.view}_target_use`, targetUse], [`imagery_${p.view}_generated_at`, generatedAt], [`imagery_${p.view}_mime`, result.mime]] as [string, string][]) imageryFacts.push({ category: "imagery", key, value, confidence: 1, sourceId });
+      });
+      await Promise.race([Promise.all(imageryWork), new Promise<void>(resolve => setTimeout(resolve, 14500))]);
     }
     // Real "current property" imagery: geocode + Google Street View embed (or
     // static image when GOOGLE_MAPS_API_KEY is configured). Keyless by default;
