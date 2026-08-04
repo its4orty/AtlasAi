@@ -57,6 +57,16 @@ export function buildStreetViewEmbedUrl(address: string, lat: string, lon: strin
  * Server-side geocode via Nominatim (no key needed). Returns the first result's
  * lat/lon as strings, or null when the request fails / returns nothing.
  */
+export async function reverseGeocodeAddress(lat: number, lon: number): Promise<string | null> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}&format=json`;
+    const res = await fetchWithTimeout(url, { headers: { "User-Agent": UA, accept: "application/json" } }, 8000);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { display_name?: string };
+    return data.display_name?.trim() || null;
+  } catch { return null; }
+}
+
 export async function geocodeAddress(address: string): Promise<{ lat: string; lon: string } | null> {
   const url = `${NOMINATIM_URL}?q=${encodeURIComponent(`${address}, UK`)}&format=json&limit=1`;
   const res = await fetchWithTimeout(url, { headers: { "User-Agent": UA, accept: "application/json" } }, 12000);
