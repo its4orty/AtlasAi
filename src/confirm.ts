@@ -9,14 +9,21 @@ export async function getConfirmation(db: Db, projectId: string) {
   const [project] = await db`SELECT id,address FROM projects WHERE id=${projectId}`;
   if (!project) throw new Error("project not found");
   const facts = await db`SELECT category,key,value FROM facts WHERE project_id=${projectId} ORDER BY id`;
-  const get = (key: string) => { const row = facts.find((f) => String(f.key) === key); return row?.value ? String(row.value) : null; };
+  // Latest fact for a key wins: facts accumulate over time (original discovery, then client pin corrections).
+  const get = (key: string) => { for (let i = facts.length - 1; i >= 0; i--) { if (String(facts[i].key) === key && facts[i].value) return String(facts[i].value); } return null; };
   const lat = get("coords_lat") ?? get("imagery_streetview_lat") ?? get("latitude");
   const lon = get("coords_lon") ?? get("imagery_streetview_lon") ?? get("longitude");
   const address = String(project.address);
   let embed = get("imagery_streetview_embed_url");
   if (!embed && lat && lon) embed = buildStreetViewEmbedUrl(address, lat, lon);
-  const [decision] = await db`SELECT id,choice,rationale,created_at FROM decisions WHERE project_id=${projectId} AND step='confirm' AND choice='yes' ORDER BY id DESC LIMIT 1`;
-  return { address, coords: lat && lon ? { lat: Number(lat), lon: Number(lon) } : null, streetviewEmbedUrl: embed, status: decision ? "confirmed" : "unconfirmed", decision: decision ? { id: String(decision.id), choice: String(decision.choice), rationale: decision.rationale, createdAt: String(decision.created_at) } : undefined };
+  // Only the LATEST confirm decision counts: a pin correction after a yes invalidates the confirmation.
+  const [latest] = await db`SELECT id,choice,rationale,created_at FROM decisions WHERE project_id=${projectId} AND step='confirm' ORDER BY id DESC LIMIT 1`;
+  const confirmed = isConfirmedByLatestDecision(latest?.choice);
+  return { address, coords: lat && lon ? { lat: Number(lat), lon: Number(lon) } : null, streetviewEmbedUrl: embed, status: confirmed ? "confirmed" : "unconfirmed", decision: latest ? { id: String(latest.id), choice: String(latest.choice), rationale: latest.rationale, createdAt: String(latest.created_at) } : undefined };
+}
+/** Hard-gate rule: a project is confirmed only if its most recent confirmation decision is an explicit "yes". */
+export function isConfirmedByLatestDecision(latestChoice: string | null | undefined): boolean {
+  return latestChoice === "yes";
 }
 
 export async function confirmProperty(db: Db, projectId: string, input: { decision: "yes"|"pin"; lat?: number; lon?: number; rationale?: string }) {
