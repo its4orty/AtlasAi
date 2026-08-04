@@ -53,6 +53,7 @@ export const Route = createFileRoute("/api/design")({
           if (message === "project not found") {
             return Response.json({ error: "project not found" }, { status: 404 });
           }
+          if (message === "Property not confirmed yet") return Response.json({ error: message }, { status: 423 });
           return Response.json({ error: "design generation failed" }, { status: 500 });
         }
       },
