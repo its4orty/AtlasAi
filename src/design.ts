@@ -519,8 +519,10 @@ export interface DesignStepOutput {
 
 export async function runDesignStep(db: Db, projectId: string, targetUse: string): Promise<DesignStepOutput> {
   await ensureSchema();
-  const [confirmation] = await db`SELECT id FROM decisions WHERE project_id = ${projectId} AND step = 'confirm' LIMIT 1`;
-  if (!confirmation) throw new Error('Property not confirmed yet');
+  // Hard gate: the MOST RECENT confirmation decision must be an explicit "yes".
+  // A pin correction (or anything after a prior yes) keeps the gate closed.
+  const [latestConfirm] = await db`SELECT choice FROM decisions WHERE project_id = ${projectId} AND step = 'confirm' ORDER BY id DESC LIMIT 1`;
+  if (latestConfirm?.choice !== 'yes') throw new Error('Property not confirmed yet');
 
   const [run] = await db`
     INSERT INTO pipeline_runs (project_id, step, status, started_at)
