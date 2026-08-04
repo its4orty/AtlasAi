@@ -28,6 +28,10 @@ export const EPC_REGISTER_SOURCE = "EPC register";
 const EPC_API_BASE = "https://api.get-energy-performance-data.communities.gov.uk";
 const POSTCODES_IO = "https://api.postcodes.io";
 const TIMEOUT_MS = 12_000;
+// Overpass is optional enrichment: keep mirrors concurrent and strictly bounded
+// so a slow public endpoint can never hold up design generation.
+const OVERPASS_TIMEOUT_MS = 7_000;
+const OVERPASS_SCAN_TIMEOUT_MS = 10_000;
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
@@ -174,47 +178,41 @@ function parseSite(tags: Record<string, string>): { kind: "site" | "building"; n
   return { kind, name, size };
 }
 
-/** Query Overpass (with mirror fallback). Never throws — returns [] on failure. */
+/** Query Overpass mirrors concurrently. Never throws — returns [] on failure. */
 export async function fetchNearbySites(lat: number, lon: number, radiusM = 1500): Promise<NearbySiteItem[]> {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
   const data = overpassQuery(lat, lon, radiusM);
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const json = (await fetchJson(
-        endpoint,
-        {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded", "User-Agent": UA },
-          body: new URLSearchParams({ data }),
-        },
-        TIMEOUT_MS + 5000,
-      )) as { elements?: OverpassElement[] };
-      const elements = json.elements;
-      if (!Array.isArray(elements)) throw new Error("unexpected overpass payload");
-      const items: NearbySiteItem[] = [];
-      for (const e of elements) {
-        const center = elementCenter(e);
-        const tags = e.tags ?? {};
-        if (!center) continue;
-        const parsed = parseSite(tags);
-        items.push({
-          type: parsed.kind,
-          name: parsed.name,
-          context: siteContext(tags),
-          lat: center.lat,
-          lon: center.lon,
-          distance_m: haversineM(lat, lon, center.lat, center.lon),
-          size_m2: parsed.size,
-          source: OSM_OVERPASS_SOURCE,
-          tags,
-        });
-      }
-      return items;
-    } catch {
-      // try the next mirror; all fail → []
-    }
+  const request = async (endpoint: string): Promise<NearbySiteItem[]> => {
+    const json = (await fetchJson(
+      endpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", "User-Agent": UA },
+        body: new URLSearchParams({ data }),
+      },
+      OVERPASS_TIMEOUT_MS,
+    )) as { elements?: OverpassElement[] };
+    if (!Array.isArray(json.elements)) throw new Error("unexpected overpass payload");
+    return json.elements.flatMap((e) => {
+      const center = elementCenter(e);
+      if (!center) return [];
+      const tags = e.tags ?? {};
+      const parsed = parseSite(tags);
+      return [{ type: parsed.kind, name: parsed.name, context: siteContext(tags), lat: center.lat, lon: center.lon,
+        distance_m: haversineM(lat, lon, center.lat, center.lon), size_m2: parsed.size,
+        source: OSM_OVERPASS_SOURCE, tags } satisfies NearbySiteItem];
+    });
+  };
+  try {
+    // Promise.any returns the first valid mirror, while the outer race bounds
+    // the entire scan even if all requests ignore abort signals.
+    return await Promise.race([
+      Promise.any(OVERPASS_ENDPOINTS.map(request)),
+      new Promise<NearbySiteItem[]>((resolve) => setTimeout(() => resolve([]), OVERPASS_SCAN_TIMEOUT_MS)),
+    ]);
+  } catch {
+    return [];
   }
-  return [];
 }
 
 /* ------------------------------------------------------------------ */
@@ -556,6 +554,7 @@ export interface NearbyScanInput {
  */
 export async function runNearbyScan(input: NearbyScanInput): Promise<NearbyFact[]> {
   const { targetUse, sourceId, generatedAt } = input;
+  const failed = (note: string) => buildNearbyFacts([], { generatedAt, sourceId, status: "failed", note });
   const hasCoords = input.lat != null && input.lon != null && Number.isFinite(input.lat) && Number.isFinite(input.lon);
   if (!hasCoords && !input.postcode) {
     return buildNearbyFacts([], {

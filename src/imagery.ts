@@ -20,7 +20,10 @@ const VERSION = "imagery-prompt-v2";
 const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
 function spatialBrief(facts: SpatialFact[]): string {
   const allowed = facts.filter(f => (f.confidence ?? 1) >= 0.8 && /room|dimension|area|floor|ceiling|layout|use_class/i.test(f.key));
-  return allowed.map(f => `${f.key.replace(/_/g, " ")}: ${f.value}`).join("; ").slice(0, 900) || "an indicative commercial interior with an open layout";
+  // Image providers have tighter prompt limits than our report. Keep only a
+  // compact, high-confidence evidence brief; privacy-safe keys/values are still
+  // filtered by the caller's fact selection and the prompt never includes an address.
+  return allowed.map(f => `${f.key.replace(/_/g, " ")}: ${f.value}`).join("; ").slice(0, 450) || "an indicative commercial interior with an open layout";
 }
 function designBrief(design?: DesignContext): string {
   if (!design) return "";
