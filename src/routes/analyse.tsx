@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * /analyse — enter an address, start the analysis pipeline, and see the
@@ -24,6 +24,14 @@ interface Result {
   steps: StepRow[];
 }
 
+interface Confirmation {
+  status: "confirmed" | "unconfirmed";
+  decision?: { choice: string } | null;
+  coords: { lat: number; lon: number } | null;
+  address: string;
+  streetviewEmbedUrl: string | null;
+}
+
 const STEP_TITLES: Record<string, string> = {
   normalise: "Address normalisation & validation",
   discovery: "Property discovery",
@@ -46,6 +54,46 @@ function Analyse() {
   const [designBusy, setDesignBusy] = useState(false);
   const [designMsg, setDesignMsg] = useState("");
   const [confirmGate, setConfirmGate] = useState(false);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState("");
+
+  useEffect(() => {
+    if (!result) return;
+    let cancelled = false;
+    setConfirmation(null);
+    setConfirmError("");
+    fetch(`/api/confirm/${result.projectId}`)
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error ?? "Could not load property confirmation.");
+        return data as Confirmation;
+      })
+      .then((data) => { if (!cancelled) setConfirmation(data); })
+      .catch((e: unknown) => { if (!cancelled) setConfirmError(e instanceof Error ? e.message : "Could not load property confirmation."); });
+    return () => { cancelled = true; };
+  }, [result]);
+
+  async function confirmProperty() {
+    if (!result || confirmBusy) return;
+    setConfirmBusy(true);
+    setConfirmError("");
+    try {
+      const r = await fetch(`/api/confirm/${result.projectId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision: "yes" }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? "Could not confirm this property.");
+      setConfirmation(data as Confirmation);
+      setConfirmGate(false);
+    } catch (e: unknown) {
+      setConfirmError(e instanceof Error ? e.message : "Could not confirm this property.");
+    } finally {
+      setConfirmBusy(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -169,15 +217,52 @@ function Analyse() {
 
             <div style={{ borderTop: "1px solid var(--line, #ddd6c8)", marginTop: 20, paddingTop: 18 }}>
               <p className="section-label">CONCEPT DESIGN · CONVERT TO A NEW USE</p>
+              {confirmation?.status === "confirmed" ? (
+                <p className="form-note" style={{ color: "#16803c", fontWeight: 600 }}>
+                  Property confirmed ✓ {confirmation.coords && <>Coordinates locked: {confirmation.coords.lat.toFixed(5)}, {confirmation.coords.lon.toFixed(5)}</>}
+                </p>
+              ) : confirmation?.status === "unconfirmed" ? (
+                <div className="panel" style={{ margin: "14px 0 18px", borderColor: "#d9b96e" }}>
+                  <h3 style={{ margin: "0 0 6px" }}>Is this the correct property?</h3>
+                  <p className="form-note" style={{ marginTop: 0 }}>
+                    The design only runs once you confirm the property — this matches the product&apos;s core guarantee.
+                  </p>
+                  {confirmation.streetviewEmbedUrl ? (
+                    <iframe
+                      src={confirmation.streetviewEmbedUrl}
+                      title="Live Google Street View preview"
+                      allowFullScreen
+                      style={{ width: "100%", height: 300, border: 0, borderRadius: 10, margin: "10px 0" }}
+                    />
+                  ) : (
+                    <p className="form-note">Street View preview is unavailable for this location.</p>
+                  )}
+                  <p className="form-note">
+                    <strong>{confirmation.address}</strong>
+                    {confirmation.coords && <> · Reference: {confirmation.coords.lat.toFixed(5)}, {confirmation.coords.lon.toFixed(5)}</>}
+                  </p>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+                    <button type="button" onClick={confirmProperty} disabled={confirmBusy}>
+                      {confirmBusy ? "Confirming…" : "Yes, this is the correct property"}
+                    </button>
+                    <a className="button button-secondary" href={`/confirm/${result.projectId}`}>
+                      No, that&apos;s not it — correct the location
+                    </a>
+                  </div>
+                  {confirmError && <p className="form-note" style={{ color: "#a33" }} role="alert">{confirmError}</p>}
+                </div>
+              ) : (
+                <p className="form-note">Loading the real-property confirmation preview…</p>
+              )}
               <form className="analyse-form" onSubmit={generateDesign} aria-label="Generate a concept design">
                 <input
                   aria-label="Target use"
                   value={targetUse}
                   onChange={(e) => setTargetUse(e.target.value)}
                   placeholder="e.g. barber shop, cafe, office"
-                  disabled={designBusy}
+                  disabled={designBusy || confirmation?.status !== "confirmed"}
                 />
-                <button type="submit" disabled={designBusy}>
+                <button type="submit" disabled={designBusy || confirmation?.status !== "confirmed"}>
                   {designBusy ? "Generating concept…" : "Generate concept design"}
                 </button>
               </form>
