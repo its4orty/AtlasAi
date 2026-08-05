@@ -6,6 +6,7 @@ import { designInputHash, llmProviderLabel, requestGemini, type LlmDesign } from
 import { buildRenderPrompts, requestImage, saveRender, imageryPromptVersion } from "~/imagery";
 import { fetchStreetViewFacts } from "~/streetview";
 import { reverseGeocodePostcode, runNearbyScan } from "~/nearby";
+import { fetchFacadeSvg } from "~/facade";
 
 /**
  * ATLAS AI — concept design generation (Phase 1).
@@ -645,7 +646,7 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
     const imageToken = process.env.CLOUDFLARE_API_TOKEN?.trim() && process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
     if (!imageToken || imageToken.startsWith("your-")) imageryFacts.push({ category: "imagery", key: "imagery_status", value: "skipped", confidence: 1, sourceId });
     else {
-      const prompts = buildRenderPrompts(factsAll.map(f => ({ key: f.key, value: f.value, confidence: Number(f.confidence) })), targetUse, designContext).slice(0, 2);
+      const prompts = buildRenderPrompts(factsAll.map(f => ({ key: f.key, value: f.value, confidence: 0.5 })), targetUse, designContext).slice(0, 2);
       const imageryWork = prompts.map(async (p) => {
         const [cachedImage] = await db`SELECT value FROM facts WHERE project_id = ${projectId} AND category = 'imagery' AND key = ${`imagery_${p.view}_prompt_hash`} AND value = ${p.hash} ORDER BY id DESC LIMIT 1`;
         if (cachedImage) return;
@@ -690,9 +691,29 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       generatedAt,
     });
 
+    // Best-effort licensed facade reference. Confirmation is already hard-gated above;
+    // Mapillary remains optional and never blocks the core design path.
+    const facadeFacts: Array<{ category: string; key: string; value: string; confidence: number; sourceId: string | null }> = [];
+    if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
+      try {
+        const facade = await Promise.race([
+          fetchFacadeSvg({ lat, lon }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 9000)),
+        ]);
+        if (facade) {
+          facadeFacts.push({ category: "design", key: "facade_status", value: facade.elevation.status === "generated" ? "generated" : "unavailable", confidence: 1, sourceId });
+          if (facade.elevation.status === "generated") facadeFacts.push({ category: "design", key: "facade_svg", value: facade.elevation.svg, confidence: 0.55, sourceId });
+          if (facade.image.status === "available") {
+            for (const [key, value] of [["facade_source", `Mapillary image ${facade.image.imageId}`], ["facade_attribution", facade.image.attribution], ["facade_generated_at", generatedAt]] as [string, string][]) facadeFacts.push({ category: "design", key, value, confidence: 1, sourceId });
+          }
+        } else facadeFacts.push({ category: "design", key: "facade_status", value: "unavailable", confidence: 1, sourceId });
+      } catch { facadeFacts.push({ category: "design", key: "facade_status", value: "unavailable", confidence: 1, sourceId }); }
+    } else facadeFacts.push({ category: "design", key: "facade_status", value: "unavailable", confidence: 1, sourceId });
+
     const factOuts: Array<{ category: string; key: string; value: string; confidence: number; sourceId: string | null }> = [
       ...imageryFacts,
       ...nearbyFacts,
+      ...facadeFacts,
       { category: "design", key: "design_target_use", value: targetUse, confidence: 0.95, sourceId },
       { category: "design", key: "design_program_label", value: program.label, confidence: 0.9, sourceId },
       { category: "design", key: "design_status", value: llmDesign ? "generated_llm" : "generated_deterministic", confidence: 1, sourceId },
