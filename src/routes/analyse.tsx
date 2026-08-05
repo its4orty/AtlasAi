@@ -45,6 +45,7 @@ function Analyse() {
   const [targetUse, setTargetUse] = useState("barber shop");
   const [designBusy, setDesignBusy] = useState(false);
   const [designMsg, setDesignMsg] = useState("");
+  const [confirmGate, setConfirmGate] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -77,6 +78,7 @@ function Analyse() {
     if (!result || designBusy) return;
     setDesignBusy(true);
     setDesignMsg("");
+    setConfirmGate(false);
     try {
       const r = await fetch("/api/design", {
         method: "POST",
@@ -85,7 +87,9 @@ function Analyse() {
       });
       const data = await r.json();
       if (!r.ok) {
-        setDesignMsg(data.error ?? "Design generation failed — please try again.");
+        const gated = data.error === "Property not confirmed yet";
+        setConfirmGate(gated);
+        setDesignMsg(gated ? "" : data.error ?? "Design generation failed — please try again.");
         return;
       }
       setDesignMsg(
@@ -178,11 +182,18 @@ function Analyse() {
                 </button>
               </form>
               <p className="form-note" aria-live="polite">
-                {designMsg
-                  ? designMsg
-                  : "The concept is an indicative zoning sketch generated from the space facts in project memory."}
-                {designMsg && !designMsg.startsWith("Concept") && ""}
-                {designMsg.startsWith("Concept") && (
+                {confirmGate ? (
+                  <>
+                    This property hasn't been confirmed yet — the concept design only runs after you confirm the correct
+                    property.{" "}
+                    <a href={`/confirm/${result.projectId}`}>Confirm this is the right property ↗</a>
+                  </>
+                ) : designMsg ? (
+                  designMsg
+                ) : (
+                  "The concept is an indicative zoning sketch generated from the space facts in project memory."
+                )}
+                {!confirmGate && designMsg.startsWith("Concept") && (
                   <>
                     {" "}
                     <a href={`/report/${result.projectId}`}>Open the report to view the floor plan ↗</a>
