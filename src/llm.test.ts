@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { designInputHash, requestGemini, validateLlmDesign, type SpaceInput } from "./llm";
+import {
+  designInputHash,
+  llmDesignWasRepaired,
+  normalizeLlmDesign,
+  requestGemini,
+  validateLlmDesign,
+  type SpaceInput,
+} from "./llm";
 
 /**
  * Unit tests for src/llm.ts — Gemini-backed concept design generation.
@@ -29,7 +36,14 @@ const validDesign = {
       sourceRoomIndex: 0,
       isNewPartition: false,
       zones: [
-        { label: "Cutting station", xM: 0, yM: 0, widthM: 3, depthM: 2, notes: "two chairs" },
+        {
+          label: "Cutting station",
+          xM: 0,
+          yM: 0,
+          widthM: 3,
+          depthM: 2,
+          notes: "two chairs",
+        },
         { label: "Backwash", xM: 0, yM: 2, widthM: 2, depthM: 2, notes: "" },
       ],
     },
@@ -41,7 +55,16 @@ const validDesign = {
       areaM2: 20,
       sourceRoomIndex: 1,
       isNewPartition: true,
-      zones: [{ label: "Reception", xM: 0, yM: 0, widthM: 5, depthM: 3, notes: "till" }],
+      zones: [
+        {
+          label: "Reception",
+          xM: 0,
+          yM: 0,
+          widthM: 5,
+          depthM: 3,
+          notes: "till",
+        },
+      ],
     },
   ],
   circulationM2: 4,
@@ -54,7 +77,9 @@ function geminiResponse(text: string): Response {
   });
 }
 
-function mockFetchResolving(text: string): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
+function mockFetchResolving(
+  text: string,
+): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
   return async (url) => {
     expect(String(url)).toContain("generativelanguage.googleapis.com");
     return geminiResponse(text);
@@ -149,27 +174,111 @@ describe("designInputHash", () => {
 });
 
 describe("OpenAI-compatible provider", () => {
-  const openAiResponse = (content: string, status = 200) => Response.json(status === 200 ? { choices: [{ message: { content } }] } : { error: { message: "unsupported response format" } }, { status });
-  afterEach(() => { delete process.env.LLM_PROVIDER; delete process.env.LLM_API_KEY; delete process.env.LLM_BASE_URL; delete process.env.LLM_MODEL; });
+  const openAiResponse = (content: string, status = 200) =>
+    Response.json(
+      status === 200
+        ? { choices: [{ message: { content } }] }
+        : { error: { message: "unsupported response format" } },
+      { status },
+    );
+  afterEach(() => {
+    delete process.env.LLM_PROVIDER;
+    delete process.env.LLM_API_KEY;
+    delete process.env.LLM_BASE_URL;
+    delete process.env.LLM_MODEL;
+  });
 
   test("happy path parses choices message content", async () => {
-    process.env.LLM_PROVIDER = "openai"; process.env.LLM_API_KEY = "test-key"; process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1"; process.env.LLM_MODEL = "llama-test";
-    const original = globalThis.fetch; const calls: unknown[] = [];
-    globalThis.fetch = (async (url, init) => { calls.push(JSON.parse(String(init?.body))); expect(String(url)).toBe("https://api.groq.com/openai/v1/chat/completions"); return openAiResponse(JSON.stringify(validDesign)); }) as typeof fetch;
-    try { expect(await requestGemini(input)).toEqual(validDesign); expect(calls).toHaveLength(1); } finally { globalThis.fetch = original; }
+    process.env.LLM_PROVIDER = "openai";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1";
+    process.env.LLM_MODEL = "llama-test";
+    const original = globalThis.fetch;
+    const calls: unknown[] = [];
+    globalThis.fetch = (async (url, init) => {
+      calls.push(JSON.parse(String(init?.body)));
+      expect(String(url)).toBe(
+        "https://api.groq.com/openai/v1/chat/completions",
+      );
+      return openAiResponse(JSON.stringify(validDesign));
+    }) as typeof fetch;
+    try {
+      expect(await requestGemini(input)).toEqual(validDesign);
+      expect(calls).toHaveLength(1);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   test("strict schema 400 retries with json_object", async () => {
-    process.env.LLM_PROVIDER = "openai"; process.env.LLM_API_KEY = "test-key"; process.env.LLM_BASE_URL = "https://models.github.ai/inference";
-    const original = globalThis.fetch; const formats: string[] = [];
-    globalThis.fetch = (async (_url, init) => { const body = JSON.parse(String(init?.body)); formats.push(body.response_format.type); return formats.length === 1 ? openAiResponse("", 400) : openAiResponse(JSON.stringify(validDesign)); }) as typeof fetch;
-    try { expect(await requestGemini(input)).toEqual(validDesign); expect(formats).toEqual(["json_schema", "json_object"]); } finally { globalThis.fetch = original; }
+    process.env.LLM_PROVIDER = "openai";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_BASE_URL = "https://models.github.ai/inference";
+    const original = globalThis.fetch;
+    const formats: string[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      formats.push(body.response_format.type);
+      return formats.length === 1
+        ? openAiResponse("", 400)
+        : openAiResponse(JSON.stringify(validDesign));
+    }) as typeof fetch;
+    try {
+      expect(await requestGemini(input)).toEqual(validDesign);
+      expect(formats).toEqual(["json_schema", "json_object"]);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   test("both response formats failing returns null", async () => {
-    process.env.LLM_PROVIDER = "openai"; process.env.LLM_API_KEY = "test-key"; process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1";
-    const original = globalThis.fetch; let calls = 0;
-    globalThis.fetch = (async () => { calls++; return openAiResponse("", 400); }) as typeof fetch;
-    try { expect(await requestGemini(input)).toBeNull(); expect(calls).toBe(4); } finally { globalThis.fetch = original; }
+    process.env.LLM_PROVIDER = "openai";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1";
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return openAiResponse("", 400);
+    }) as typeof fetch;
+    try {
+      expect(await requestGemini(input)).toBeNull();
+      expect(calls).toBe(4);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+describe("normalizeLlmDesign", () => {
+  test("valid output is untouched", () => {
+    const n = normalizeLlmDesign(validDesign, input);
+    expect(n.design).toEqual(validDesign);
+    expect(n.repaired).toBe(false);
+  });
+  test("coerces numeric strings and fills missing notes", () => {
+    const raw = structuredClone(validDesign) as any;
+    raw.rooms[0].widthM = "6";
+    raw.rooms[0].depthM = "4";
+    raw.rooms[0].areaM2 = "999";
+    delete raw.notes;
+    const n = normalizeLlmDesign(raw, input);
+    expect(n.design).not.toBeNull();
+    expect(n.repaired).toBe(true);
+    expect(n.design!.rooms[0].areaM2).toBe(24);
+    expect(n.design!.notes).toEqual([]);
+    expect(llmDesignWasRepaired(n.design!)).toBe(true);
+  });
+  test("clamps a slightly out-of-envelope zone", () => {
+    const raw = structuredClone(validDesign) as any;
+    raw.rooms[0].zones[0].xM = 4.5;
+    const n = normalizeLlmDesign(raw, input);
+    expect(n.design).not.toBeNull();
+    expect(n.design!.rooms[0].zones[0].xM).toBe(3);
+  });
+  test("rejects an impossible room envelope", () => {
+    const raw = structuredClone(validDesign) as any;
+    raw.rooms[0].widthM = 12;
+    expect(normalizeLlmDesign(raw, input).design).toBeNull();
   });
 });
