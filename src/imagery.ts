@@ -10,8 +10,10 @@ export interface DesignContext {
   zoneNames?: string[];
   rooms?: string[];
   allocatedM2?: number;
+  buildingForm?: "industrial_unit" | "retail_unit" | "house" | "unknown";
+  visualReference?: string;
 }
-const VERSION = "imagery-prompt-v3";
+const VERSION = "imagery-prompt-v4";
 const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
 function spatialBrief(facts: SpatialFact[]): string {
   const allowed = facts.filter(f => (f.confidence ?? 1) >= 0.8 && /room|dimension|area|floor|ceiling|layout|use_class/i.test(f.key));
@@ -24,6 +26,8 @@ function designBrief(design?: DesignContext): string {
   const zones = (design.zoneNames ?? []).filter(Boolean).slice(0, 5);
   if (zones.length) parts.push(`zones: ${zones.join(", ")}`);
   if (design.allocatedM2 && design.allocatedM2 > 0) parts.push(`area about ${design.allocatedM2} m²`);
+  const form = design.buildingForm ?? "unknown";
+  parts.push(`building form: ${form}`);
   const rooms = (design.rooms ?? []).filter(Boolean).slice(0, 4);
   if (rooms.length) parts.push(`rooms: ${rooms.join(", ")}`);
   return parts.join("; ").slice(0, 260);
@@ -32,8 +36,11 @@ export function buildRenderPrompts(facts: SpatialFact[], targetUse: string, desi
   const brief = spatialBrief(facts);
   const designed = designBrief(design);
   const common = `Target use: ${targetUse}. Evidence: ${brief}.${designed ? ` Designed layout: ${designed}.` : ""} Approximate only; do not invent measurements.`;
-  const exterior = `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} Show a generic street-facing commercial premises adapted for this use, welcoming entrance, restrained contemporary materials, daylight, eye-level three-quarter view, realistic scale and lens perspective. No people, text, logos, signage lettering, address or personal data. Generic property only. Calm coherent composition, realistic details, subtle weathering and soft shadows. Concept visualisation not a photograph.`;
-  const interior = `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} Show the proposed ${targetUse} interior matching the designed layout with listed zones, clear circulation, suitable generic equipment and fittings, timber, plaster, glass and durable flooring, daylight with warm practical light, wide eye-level view, realistic construction. Do not add absent rooms or dimensions. No people, text, logos, signage or personal data. Concept visualisation not a photograph.`;
+  const form = design?.buildingForm ?? "unknown";
+  const exteriorForm = form === "industrial_unit" ? "single-storey industrial unit on a business park, flat roof, blockwork or metal-clad walls, wide roller-shutter or glazed entrance adapted for the new use, ground floor only, no upper storey, no residential floors" : form === "retail_unit" ? "single-storey shop unit, no residential above" : form === "house" ? "the confirmed house form, with only evidence-supported storeys" : "commercial premises, ground floor only, no upper storey assumed";
+  const interiorForm = form === "industrial_unit" ? "inside a single-storey industrial unit shell" : form === "retail_unit" ? "inside a single-storey shop unit" : "inside the confirmed ground-floor premises";
+  const exterior = `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} Show ${exteriorForm} adapted for this use, welcoming entrance, restrained contemporary materials, daylight, eye-level three-quarter view, realistic scale and lens perspective. No storeys or residential use beyond the evidence. No people, text, logos, signage lettering, address or personal data. Generic property only. Calm coherent composition, realistic details, subtle weathering and soft shadows. Concept visualisation not a photograph.`;
+  const interior = `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} Show the proposed ${targetUse} interior in ${interiorForm}, matching the designed layout with listed zones, clear circulation, suitable generic equipment and fittings, timber, plaster, glass and durable flooring, daylight with warm practical light, wide eye-level view, realistic construction. Do not add absent rooms or dimensions. No people, text, logos, signage or personal data. Concept visualisation not a photograph.`;
   return [{ view: "exterior", prompt: exterior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|${JSON.stringify(design ?? null)}|exterior`).digest("hex") }, { view: "interior", prompt: interior, hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|${JSON.stringify(design ?? null)}|interior`).digest("hex") }].filter(p => words(p.prompt) >= 80 && words(p.prompt) <= 180);
 }
 async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> { return fetch(url, { ...init, signal: AbortSignal.timeout(ms) }); }

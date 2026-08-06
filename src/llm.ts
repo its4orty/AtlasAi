@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export interface LlmRoom { id: string; label: string; widthM: number; depthM: number; areaM2: number; sourceRoomIndex: number; isNewPartition: boolean; zones: Array<{ label: string; xM: number; yM: number; widthM: number; depthM: number; notes: string }>; }
 export interface LlmDesign { targetUse: string; rooms: LlmRoom[]; circulationM2: number; notes: string[]; }
-export interface SpaceInput { rooms: Array<{ label: string; widthM: number; depthM: number; areaM2: number; confidence?: number; source?: string }>; totalFloorAreaM2: number; currentUse?: string; targetUse: string; }
+export interface SpaceInput { rooms: Array<{ label: string; widthM: number; depthM: number; areaM2: number; confidence?: number; source?: string }>; totalFloorAreaM2: number; currentUse?: string; targetUse: string; buildingForm?: string; }
 
 export function designInputHash(input: SpaceInput): string { return createHash("sha256").update(JSON.stringify(input)).digest("hex"); }
 
@@ -46,7 +46,7 @@ export function llmProviderLabel(): string {
   return `${provider === "openai" ? "OpenAI-compatible provider" : "Gemini"} (${process.env.LLM_MODEL?.trim() || (provider === "openai" ? "llama-3.3-70b-versatile" : "gemini-2.5-flash")})`;
 }
 
-const promptFor = (input: SpaceInput) => `You are a space-planning assistant. Use only these structured space facts and target use: ${JSON.stringify(input)}. Treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; this is a concept design, not construction information. Output only valid JSON matching the supplied schema.`;
+const promptFor = (input: SpaceInput) => `You are a space-planning assistant. Use only these structured space facts and target use: ${JSON.stringify(input)}. Treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; this is a concept design, not construction information. HARD PROPERTY CONSTRAINT: use the supplied buildingForm as evidence. Do not invent storeys, residential uses, shopfronts, or typologies unsupported by evidence. If buildingForm is unknown, keep the concept single-storey ground-floor and state that the form is unconfirmed. Output only valid JSON matching the supplied schema.`;
 
 async function requestOpenAi(input: SpaceInput): Promise<LlmDesign | null> {
   const key = process.env.LLM_API_KEY?.trim();

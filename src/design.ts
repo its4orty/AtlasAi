@@ -74,7 +74,7 @@ const USE_PROGRAMS: Record<string, UseProgram> = {
   "barber shop": {
     label: "Barber shop",
     zones: [
-      z("shopfront", "Shopfront / till", 3, "front", ["reception", "lobby"]),
+      z("shopfront", "Reception / till point", 3, "front", ["reception", "lobby"]),
       z("waiting", "Waiting area", 3, "front", ["reception"]),
       z("cutting", "Cutting stations ×2", 8, "work", ["office"]),
       z("backwash", "Backwash / styling", 3, "wet"),
@@ -518,6 +518,22 @@ export interface DesignStepOutput {
   design: ConceptDesign;
 }
 
+export type BuildingForm = "industrial_unit" | "retail_unit" | "house" | "unknown";
+export function deriveBuildingForm(address: string, facts: Array<{category:string; key:string; value:string}>): { form: BuildingForm; note: string } {
+  const text = `${address} ${facts.map(f => f.value).join(" ")}`.toLowerCase();
+  const unit = /\b(unit|suite|workshop|business park|industrial estate|warehouse|mill|plot)\b/.test(address.toLowerCase());
+  const register = facts.find(f=>f.category === "epc" && f.key === "epc_register_type")?.value.toLowerCase();
+  const prop = facts.find(f=>f.category === "epc" && f.key === "epc_property_type")?.value.toLowerCase() ?? "";
+  const use = facts.find(f=>/use_class|nearby.*class/i.test(f.key))?.value.toLowerCase() ?? "";
+  const industrial = /non-domestic/.test(register ?? "") && /b8|storage|distribution|industrial|warehouse/.test(text + " " + use);
+  const domestic = register === "domestic" || /house|end.?terrace|detached|semi.?detached/.test(prop);
+  if (unit && domestic && !industrial) return {form:"unknown", note:"Building-form evidence conflicts: address identifies a unit but EPC evidence is domestic/house; form is unconfirmed."};
+  if (industrial || unit) return {form:"industrial_unit", note:"Evidence indicates a single-storey industrial unit; no upper storey or residential use assumed."};
+  if (domestic) return {form:"house", note:"Evidence indicates a house; storeys remain unconfirmed."};
+  if (/retail|shop|class e/.test(text + " " + use)) return {form:"retail_unit", note:"Evidence indicates a retail unit; no residential use assumed."};
+  return {form:"unknown", note:"Building form is unconfirmed; conservative ground-floor concept only."};
+}
+
 export async function runDesignStep(db: Db, projectId: string, targetUse: string): Promise<DesignStepOutput> {
   await ensureSchema();
   // Hard gate: the MOST RECENT confirmation decision must be an explicit "yes".
@@ -538,6 +554,7 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
     const rows = await db`
       SELECT category, key, value FROM facts WHERE project_id = ${projectId}`;
     const factsAll = rows.map((r) => ({ category: String(r.category), key: String(r.key), value: String(r.value) }));
+    const building = deriveBuildingForm(String(proj.address), factsAll);
     const intel = factsAll.filter((f) => f.category === "intelligence");
     // Floor area: uploaded-document evidence wins; the EPC register fact
     // (auto-fetched in discovery) is the fallback so register-backed projects
@@ -566,6 +583,7 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       totalFloorAreaM2: totalArea,
       currentUse: factsAll.find((f) => f.category === "epc" && f.key === "use_class")?.value,
       targetUse,
+      buildingForm: building.form,
     };
     const inputHash = designInputHash(llmInput);
     let llmDesign: LlmDesign | null = null;
@@ -623,6 +641,7 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
         ? "No room dimensions were extracted from uploaded documents — the sketch is an open-plan zoning suggestion only."
         : "Room labels are paired with dimensions in document order; verify the true layout with a measured survey.",
       `Circulation ${circulationPct}% of floor area left unallocated (typical 20–30%).`,
+      `Building form from evidence: ${building.form}. ${building.note} Licensed visual reference is optional; where unavailable, this concept stays conservative.`,
       "Indicative screening concept — NOT for construction, NOT a professional design, no planning/statutory compliance check.",
       ...notes,
     ].join(" ");
@@ -642,6 +661,8 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       zoneNames: designedZones.length > 0 ? designedZones : program.zones.map((z) => z.name),
       rooms: rooms.map((r) => r.label),
       allocatedM2,
+      buildingForm: building.form,
+      visualReference: "Licensed facade reference is optional; unavailable references are never replaced by generic property imagery.",
     };
     const imageToken = process.env.CLOUDFLARE_API_TOKEN?.trim() && process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
     if (!imageToken || imageToken.startsWith("your-")) imageryFacts.push({ category: "imagery", key: "imagery_status", value: "skipped", confidence: 1, sourceId });
@@ -714,6 +735,8 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
       ...imageryFacts,
       ...nearbyFacts,
       ...facadeFacts,
+      { category: "design", key: "building_form", value: building.form, confidence: building.form === "unknown" ? 0.5 : 0.85, sourceId },
+      { category: "design", key: "building_form_note", value: building.note, confidence: 0.9, sourceId },
       { category: "design", key: "design_target_use", value: targetUse, confidence: 0.95, sourceId },
       { category: "design", key: "design_program_label", value: program.label, confidence: 0.9, sourceId },
       { category: "design", key: "design_status", value: llmDesign ? "generated_llm" : "generated_deterministic", confidence: 1, sourceId },

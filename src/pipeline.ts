@@ -185,44 +185,29 @@ async function epcFetchCertificate(rrn: string, token: string): Promise<Record<s
   }
 }
 
-/** Uppercase, punctuation-collapsed address fragment for comparison. */
-function normAddr(s: string): string {
-  return s.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+/** Address evidence matching: identifier-level only; street/postcode alone is insufficient. */
+export function addressLines(value: Record<string, unknown> | string): string {
+  if (typeof value === "string") return value;
+  return ["addressLine1", "addressLine2", "addressLine3", "addressLine4", "addressLine5", "postcode"].map(k => String(value[k] ?? "")).filter(Boolean).join(" ");
 }
-/** Leading house number or range ("244", "242-244"), or "" if none. */
-function houseNumber(s: string): string {
-  const m = normAddr(s).match(/^(\d+[A-Z]?(?:-\d+[A-Z]?)?)/);
-  return m ? m[1] : "";
+function normAddr(s: string): string { return s.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim(); }
+function houseNumber(s: string): string { const m = normAddr(s).match(/(?:^| )(#?\d+[A-Z]?(?:-\d+[A-Z]?)?)(?: |$)/); return m ? m[1].replace(/^#/, "") : ""; }
+function unitId(s: string): string { const m = normAddr(s).match(/\b(?:UNIT|SUITE|WORKSHOP|PLOT|UNITED)\s*([A-Z]?\d+[A-Z]?)\b/); return m ? m[1] : ""; }
+function buildingName(s: string): string { const m = normAddr(s).match(/\b([A-Z0-9]+\s+(?:BUSINESS|INDUSTRIAL)\s+PARK|[A-Z0-9]+\s+MILL)\b/); return m ? m[1] : ""; }
+function streetTokens(s: string): string[] { return normAddr(s).split(/\s+/).filter(x => x.length > 2 && !/^\d/.test(x) && !/^(UNIT|SUITE|WORKSHOP|PLOT|BUSINESS|INDUSTRIAL|PARK|ESTATE)$/.test(x)); }
+function hasCommercialToken(s: string): boolean { return /\b(UNIT|SUITE|WORKSHOP|BUSINESS PARK|INDUSTRIAL ESTATE|WAREHOUSE|STUDIO|MILL|PLOT)\b/i.test(s); }
+/** Scores only genuine identifier agreement at/above the 0.7 threshold. */
+export function epcAddressScore(projectAddr: string, row: Record<string, unknown>, register?: "domestic"|"non-domestic"): number {
+  const proj=normAddr(projectAddr), cand=normAddr(addressLines(row)); if (!cand) return 0;
+  const pUnit=unitId(proj), cUnit=unitId(cand);
+  if ((pUnit || cUnit) && pUnit !== cUnit) return 0;
+  const pStreet=streetTokens(proj), cStreet=streetTokens(cand);
+  const streetMatch=pStreet.some(t=>cStreet.includes(t)); if (!streetMatch) return 0;
+  if (!pUnit && !cUnit) { const pn=houseNumber(proj), cn=houseNumber(cand); if (!pn || !cn || !numbersOverlap(pn,cn)) return 0.55; return hasCommercialToken(proj) && register === "domestic" ? 0.4 : 1; }
+  if (pUnit && cUnit && pUnit===cUnit) return hasCommercialToken(proj) && register === "non-domestic" ? 1 : 0.9;
+  return 0;
 }
-/** Street name from a register row (address minus leading number). */
-function streetName(s: string): string {
-  return normAddr(s).replace(/^\d+[A-Z]?(?:-\d+[A-Z]?)?\s*/, "").split(",")[0].trim();
-}
-function numbersOverlap(a: string, b: string): boolean {
-  if (!a || !b) return false;
-  const parse = (x: string) => x.split("-").map((n) => parseInt(n, 10));
-  const [a1, a2] = parse(a);
-  const [b1, b2] = parse(b);
-  const ar = [Math.min(a1, a2 ?? a1), Math.max(a1, a2 ?? a1)];
-  const br = [Math.min(b1, b2 ?? b1), Math.max(b1, b2 ?? b1)];
-  return ar[0] <= br[1] && br[0] <= ar[1];
-}
-/**
- * 0..1 match score between the project address and a register summary row.
- * 1 = same street + overlapping house number; 0.7 = same street, number unknown;
- * 0 = different street (or nothing to compare).
- */
-function epcAddressScore(projectAddr: string, row: Record<string, unknown>): number {
-  const proj = normAddr(projectAddr).replace(/\b[A-Z]{1,2}\d[A-Z0-9]?\s?\d[A-Z]{2}\b/, " ");
-  const cand = normAddr(`${String(row.addressLine1 ?? "")} ${String(row.addressLine2 ?? "")}`);
-  if (!cand) return 0;
-  const cStreet = streetName(cand);
-  if (!cStreet || !proj.includes(cStreet)) return 0;
-  const pNum = houseNumber(proj);
-  const cNum = houseNumber(cand);
-  if (!pNum || !cNum) return 0.7;
-  return numbersOverlap(pNum, cNum) ? 1 : 0;
-}
+function numbersOverlap(a: string,b: string): boolean { const parse=(x:string)=>x.split("-").map(n=>parseInt(n,10)); const [a1,a2]=parse(a),[b1,b2]=parse(b); return Math.min(a1,a2||a1)<=Math.max(b1,b2||b1)&&Math.min(b1,b2||b1)<=Math.max(a1,a2||a1); }
 
 /** REAL step — free, evidence-backed screening lookups. Each provider is isolated. */
 const discoveryStep: PipelineStepDef = {
@@ -304,15 +289,15 @@ const discoveryStep: PipelineStepDef = {
         // Score every row against the project address; best score wins.
         let best: { row: Record<string, unknown>; score: number; register: "domestic" | "non-domestic" } | null = null;
         for (const row of domestic) {
-          const score = epcAddressScore(projectAddr, row);
+          const score = epcAddressScore(projectAddr, row, "domestic");
           if (score > (best?.score ?? 0)) best = { row, score, register: "domestic" };
         }
         for (const row of nonDomestic) {
-          const score = epcAddressScore(projectAddr, row);
+          const score = epcAddressScore(projectAddr, row, "non-domestic");
           if (score > (best?.score ?? 0)) best = { row, score, register: "non-domestic" };
         }
         const matched = best && best.score >= 0.7 ? best : null;
-        const matchedAddr = `${String(matched?.row.addressLine1 ?? "")} ${String(matched?.row.addressLine2 ?? "")}`.trim();
+        const matchedAddr = matched ? addressLines(matched.row) : "";
         const note = matched
           ? `EPC register searched by postcode ${postcode}: ${domestic.length} domestic and ${nonDomestic.length} non-domestic certificate(s) returned; matched "${matchedAddr}" (${matched.register} register, ${String(matched.row.registrationDate ?? "date unknown")}).`
           : `EPC register searched by postcode ${postcode}: ${domestic.length} domestic and ${nonDomestic.length} non-domestic certificate(s) returned, none matching "${projectAddr}". No EPC evidence from the register — absence is recorded honestly, not as a finding.`;
@@ -321,6 +306,7 @@ const discoveryStep: PipelineStepDef = {
           ["epc_domestic_count", String(domestic.length), 0.8],
           ["epc_non_domestic_count", String(nonDomestic.length), 0.8],
           ["epc_found", matched ? "yes" : "no", 0.9],
+          ["epc_address_matched", matched ? "yes" : "no", matched ? 0.9 : 1],
         ]);
         if (matched) {
           const rrn = String(matched.row.certificateNumber ?? "");
@@ -340,7 +326,7 @@ const discoveryStep: PipelineStepDef = {
           const ratingNum = cert?.energy_rating_current ?? cert?.asset_rating_current;
           if (typeof ratingNum === "number") epcFacts.push(["epc_energy_rating_current", String(ratingNum), 0.9]);
           epcFacts.push(["epc_register_type", matched.register, 1]);
-          epcFacts.push(["epc_address_matched", "yes", 0.9]);
+
           // EPC facts land in category 'epc' under the same source row so the
           // report's space-evidence row and the feasibility per-m² model can
           // consume them, exactly like an uploaded EPC would.
