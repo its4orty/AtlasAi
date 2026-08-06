@@ -282,3 +282,55 @@ describe("normalizeLlmDesign", () => {
     expect(normalizeLlmDesign(raw, input).design).toBeNull();
   });
 });
+
+describe("flat-list repair (json_object providers, e.g. Groq llama)", () => {
+  const flatInput: SpaceInput = {
+    rooms: [{ label: "OPEN PLAN", widthM: 8.1, depthM: 8.1, areaM2: 65 }],
+    totalFloorAreaM2: 65,
+    currentUse: "B8",
+    targetUse: "barber shop",
+    buildingForm: "industrial_unit",
+  };
+  const flatRaw = {
+    targetUse: "barber shop",
+    rooms: [
+      { label: "RECEPTION", widthM: 2, depthM: 3, areaM2: 6 },
+      { label: "CUTTING STATION 1", widthM: 1.5, depthM: 2, areaM2: 3 },
+      { label: "CUTTING STATION 2", widthM: 1.5, depthM: 2, areaM2: 3 },
+      { label: "WASH STATION", widthM: 1, depthM: 2, areaM2: 2 },
+    ],
+  };
+
+  test("salvages a flat zone list into rooms inside the evidence envelope", () => {
+    const n = normalizeLlmDesign(flatRaw, flatInput);
+    expect(n.design).not.toBeNull();
+    expect(n.repaired).toBe(true);
+    expect(llmDesignWasRepaired(n.design!)).toBe(true);
+    const d = n.design!;
+    expect(d.rooms).toHaveLength(4);
+    expect(d.rooms[0].label).toBe("RECEPTION");
+    expect(d.rooms[0].sourceRoomIndex).toBe(0);
+    expect(d.rooms[0].zones).toHaveLength(1);
+    expect(d.rooms[0].zones[0].label).toBe("RECEPTION");
+    // circulation = unallocated remainder (65 - 6 - 3 - 3 - 2)
+    expect(d.circulationM2).toBe(51);
+    expect(validateLlmDesign(d, flatInput)).toBe(true);
+  });
+
+  test("repairs a 1-based sourceRoomIndex onto the single envelope", () => {
+    const raw = structuredClone(flatRaw) as any;
+    raw.rooms[0].sourceRoomIndex = 1; // no index 1 in the evidence
+    const n = normalizeLlmDesign(raw, flatInput);
+    expect(n.design).not.toBeNull();
+    expect(n.repaired).toBe(true);
+    expect(n.design!.rooms[0].sourceRoomIndex).toBe(0);
+    expect(validateLlmDesign(n.design!, flatInput)).toBe(true);
+  });
+
+  test("rejects a design with no usable rooms (empty or unplaceable)", () => {
+    expect(normalizeLlmDesign({ targetUse: "x", rooms: [] }, flatInput).design).toBeNull();
+    const raw = structuredClone(flatRaw) as any;
+    raw.rooms = raw.rooms.map((r: any) => ({ ...r, widthM: 999, depthM: 999 }));
+    expect(normalizeLlmDesign(raw, flatInput).design).toBeNull();
+  });
+});

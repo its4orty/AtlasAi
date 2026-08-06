@@ -188,19 +188,41 @@ export function normalizeLlmDesign(
   };
   const rooms: LlmRoom[] = [];
   for (const rr of Array.isArray(raw.rooms) ? raw.rooms : []) {
-    const idx = Math.trunc(num(rr?.sourceRoomIndex, -1));
-    const env = input.rooms[idx];
-    if (!env) {
+    if (!rr || typeof rr !== "object") {
       repaired = true;
       continue;
     }
     const width = num(rr.widthM),
       depth = num(rr.depthM);
+    // Providers without strict-schema support (e.g. Groq llama json_object)
+    // often omit sourceRoomIndex and emit a flat room/zone list. Infer the
+    // smallest evidence envelope that fits the proposed dimensions.
+    const idx = Math.trunc(num(rr.sourceRoomIndex, -1));
+    let env = input.rooms[idx];
+    if (!env) {
+      repaired = true;
+      const fits = input.rooms
+        .map((r, i) => ({ r, i }))
+        .filter(
+          ({ r }) =>
+            width > 0 &&
+            depth > 0 &&
+            width <= r.widthM * 1.05 &&
+            depth <= r.depthM * 1.05,
+        )
+        .sort((a, b) => a.r.widthM * a.r.depthM - b.r.widthM * b.r.depthM);
+      env = fits[0]?.r;
+    }
+    if (!env) {
+      repaired = true;
+      continue; // no evidence envelope can host this room — drop it
+    }
     if (
       !(width > 0 && depth > 0) ||
       width > env.widthM * 1.05 ||
       depth > env.depthM * 1.05
     ) {
+      // Explicitly-referenced envelope with impossible geometry.
       repaired = true;
       return { design: null, repaired };
     }
@@ -210,12 +232,28 @@ export function normalizeLlmDesign(
       widthM: width,
       depthM: depth,
       areaM2: Math.round(width * depth * 100) / 100,
-      sourceRoomIndex: idx,
+      sourceRoomIndex: input.rooms.indexOf(env),
       isNewPartition: Boolean(rr.isNewPartition),
       zones: [],
     };
     if (rr.areaM2 !== room.areaM2) repaired = true;
-    for (const zz of Array.isArray(rr.zones) ? rr.zones : []) {
+    const rawZones = Array.isArray(rr.zones) ? rr.zones : [];
+    if (rawZones.length === 0) {
+      // Flat-list output: carry the model's proposal as a single zone inside
+      // this room so the concept still renders (marked as repaired).
+      repaired = true;
+      room.zones.push({
+        label: room.label,
+        xM: 0,
+        yM: 0,
+        widthM: width,
+        depthM: depth,
+        notes: "",
+      });
+      rooms.push(room);
+      continue;
+    }
+    for (const zz of rawZones) {
       const zw = num(zz.widthM),
         zd = num(zz.depthM);
       if (!(zw > 0 && zd > 0)) {
@@ -237,10 +275,26 @@ export function normalizeLlmDesign(
     }
     rooms.push(room);
   }
+  if (rooms.length === 0) return { design: null, repaired };
+  const allocated = rooms.reduce((acc, r) => acc + r.areaM2, 0);
+  let circulationM2: number;
+  if (typeof raw.circulationM2 === "number" && Number.isFinite(raw.circulationM2)) {
+    circulationM2 = raw.circulationM2;
+  } else if (
+    typeof raw.circulationM2 === "string" &&
+    Number.isFinite(Number(raw.circulationM2))
+  ) {
+    repaired = true;
+    circulationM2 = Number(raw.circulationM2);
+  } else {
+    // Model didn't declare circulation — leave the unallocated remainder honest.
+    repaired = true;
+    circulationM2 = Math.max(0, input.totalFloorAreaM2 - allocated);
+  }
   const design: LlmDesign = {
     targetUse: String(raw.targetUse ?? input.targetUse),
     rooms,
-    circulationM2: num(raw.circulationM2),
+    circulationM2: Math.round(circulationM2 * 100) / 100,
     notes: Array.isArray(raw.notes) ? raw.notes.map(String) : [],
   };
   if (!Array.isArray(raw.notes)) repaired = true;
@@ -263,7 +317,7 @@ export function llmProviderLabel(): string {
   return `${provider === "openai" ? "OpenAI-compatible provider" : "Gemini"} (${process.env.LLM_MODEL?.trim() || (provider === "openai" ? "llama-3.3-70b-versatile" : "gemini-2.5-flash")})`;
 }
 const promptFor = (input: SpaceInput, error?: string) =>
-  `You are a space-planning assistant. Use only these structured space facts and target use: ${JSON.stringify(input)}. Treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; this is a concept design, not construction information. HARD PROPERTY CONSTRAINT: use the supplied buildingForm as evidence. Do not invent storeys, residential uses, shopfronts, or typologies unsupported by evidence. Output only valid JSON matching the supplied schema.${error ? ` Previous output failed this exact validation: ${error}. Correct only that issue.` : ""}`;
+  `You are a space-planning assistant. Use only these structured space facts and target use: ${JSON.stringify(input)}. Treat dimensions as indicative; never invent measured facts; preserve the supplied external envelope; leave explicit circulation; this is a concept design, not construction information. HARD PROPERTY CONSTRAINT: use the supplied buildingForm as evidence. Do not invent storeys, residential uses, shopfronts, or typologies unsupported by evidence. Output ONLY a single JSON object with this exact shape: {"targetUse": string, "rooms": [{"id": string, "label": string, "widthM": number, "depthM": number, "areaM2": number, "sourceRoomIndex": number, "isNewPartition": boolean, "zones": [{"label": string, "xM": number, "yM": number, "widthM": number, "depthM": number, "notes": string}]}], "circulationM2": number, "notes": [string]}. sourceRoomIndex is the 0-based index into the supplied rooms array; each zone must lie inside its parent room (xM/yM are offsets from the room's top-left corner).${error ? ` Previous output failed this exact validation: ${error}. Correct only that issue.` : ""}`;
 
 async function requestOpenAi(input: SpaceInput): Promise<LlmDesign | null> {
   const key = process.env.LLM_API_KEY?.trim(),
