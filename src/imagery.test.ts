@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { buildRenderPrompts, requestImage } from "./imagery";
+import { buildRenderPrompts, requestImage, VIEW_DIMS } from "./imagery";
 
 const originalFetch = globalThis.fetch;
 const originalToken = process.env.CLOUDFLARE_API_TOKEN;
@@ -17,8 +17,10 @@ afterEach(() => {
   else process.env.CLOUDFLARE_ACCOUNT_ID = originalAccount;
 });
 
+const ALL_VIEWS = ["exterior_street", "exterior_elevation", "exterior_entrance", "interior"];
+
 describe("buildRenderPrompts", () => {
-  test("returns suitably detailed, privacy-safe exterior and interior prompts", () => {
+  test("emits all four views: three exterior + interior, in stable order", () => {
     const prompts = buildRenderPrompts([
       { key: "address", value: "244 London Road, Croydon CR0 2TA", confidence: 1 },
       { key: "room_dimension_m", value: "6 x 4", confidence: 0.95 },
@@ -26,7 +28,7 @@ describe("buildRenderPrompts", () => {
       { key: "total_floor_area_m2", value: "50", confidence: 0.9 },
     ], "barber shop");
 
-    expect(prompts.map((p) => p.view)).toEqual(["exterior", "interior"]);
+    expect(prompts.map((p) => p.view)).toEqual(ALL_VIEWS);
     for (const result of prompts) {
       const count = result.prompt.trim().split(/\s+/).length;
       expect(count).toBeGreaterThanOrEqual(80);
@@ -39,11 +41,43 @@ describe("buildRenderPrompts", () => {
     }
   });
 
+  test("each view has a distinct camera/angle vocabulary", () => {
+    const prompts = buildRenderPrompts([
+      { key: "total_floor_area_m2", value: "50", confidence: 0.9 },
+    ], "cafe");
+    const byView = Object.fromEntries(prompts.map((p) => [p.view, p.prompt]));
+    const street = byView.exterior_street;
+    const elevation = byView.exterior_elevation;
+    const entrance = byView.exterior_entrance;
+    const interior = byView.interior;
+
+    // Street context: 35mm eye level, across the street, neighbours.
+    expect(street).toContain("across the street");
+    expect(street).toContain("35mm");
+    expect(street).toContain("neighbours");
+    // Elevation: frontal, squared camera at 50mm, symmetrical one-point perspective.
+    expect(elevation).toContain("50mm");
+    expect(elevation).toContain("one-point perspective");
+    expect(elevation).toContain("symmetrical");
+    expect(elevation).not.toContain("35mm");
+    // Entrance: close-up, tighter framing, shallow depth of field.
+    expect(entrance.toLowerCase()).toContain("close-up");
+    expect(entrance).toContain("shallow depth of field");
+    expect(entrance).not.toContain("50mm");
+    // Interior: designed-layout interior language.
+    expect(interior).toContain("interior");
+    expect(interior).toContain("designed layout");
+    expect(interior).toContain("listed zones");
+  });
+
   test("industrial form is explicit and unknown form stays conservative", () => {
-    const industrial = buildRenderPrompts([], "barber shop", { buildingForm: "industrial_unit" }).find((p) => p.view === "exterior")!;
+    const industrial = buildRenderPrompts([], "barber shop", { buildingForm: "industrial_unit" }).find((p) => p.view === "exterior_street")!;
     expect(industrial.prompt).toContain("industrial unit");
     expect(industrial.prompt).not.toContain("street-facing commercial premises");
-    const unknown = buildRenderPrompts([], "barber shop", {}).find((p) => p.view === "exterior")!;
+    for (const result of buildRenderPrompts([], "barber shop", { buildingForm: "industrial_unit" })) {
+      expect(result.prompt).not.toContain("shopfront");
+    }
+    const unknown = buildRenderPrompts([], "barber shop", {}).find((p) => p.view === "exterior_street")!;
     expect(unknown.prompt).toContain("ground floor only");
     expect(unknown.prompt).not.toContain("shopfront");
   });
@@ -57,7 +91,7 @@ describe("buildRenderPrompts", () => {
       "gym",
       { programmeLabel: "Gym / studio", zoneNames: ["Studio floor", "Changing", "Office", "Store"], rooms: ["OPEN PLAN"], allocatedM2: 32 },
     );
-    expect(prompts.map((p) => p.view)).toEqual(["exterior", "interior"]);
+    expect(prompts.map((p) => p.view)).toEqual(ALL_VIEWS);
     for (const result of prompts) {
       const count = result.prompt.trim().split(/\s+/).length;
       expect(count).toBeGreaterThanOrEqual(80);
@@ -82,8 +116,27 @@ describe("buildRenderPrompts", () => {
       "gym",
       { programmeLabel: "Gym / studio", zoneNames: ["Cardio zone", "Free-weights area"], rooms: ["OPEN PLAN"], allocatedM2: 40 },
     );
-    expect(different[0].hash).not.toBe(prompts[0].hash);
-    expect(different[1].hash).not.toBe(prompts[1].hash);
+    for (let i = 0; i < ALL_VIEWS.length; i++) {
+      expect(different[i].hash).not.toBe(prompts[i].hash);
+    }
+  });
+
+  test("hashes are stable per view and distinct across views", () => {
+    const facts = [{ key: "total_floor_area_m2", value: "50", confidence: 0.9 }];
+    const a = buildRenderPrompts(facts, "cafe", { buildingForm: "retail_unit" });
+    const b = buildRenderPrompts(facts, "cafe", { buildingForm: "retail_unit" });
+    for (let i = 0; i < ALL_VIEWS.length; i++) {
+      expect(b[i].hash).toBe(a[i].hash); // deterministic per view
+    }
+    const hashes = new Set(a.map((p) => p.hash));
+    expect(hashes.size).toBe(ALL_VIEWS.length); // each view hashes differently
+  });
+
+  test("per-view Pollinations dimensions: entrance is portrait, others landscape", () => {
+    expect(VIEW_DIMS.exterior_street).toEqual({ width: 1024, height: 768 });
+    expect(VIEW_DIMS.exterior_elevation).toEqual({ width: 1024, height: 768 });
+    expect(VIEW_DIMS.exterior_entrance).toEqual({ width: 768, height: 1024 });
+    expect(VIEW_DIMS.interior).toEqual({ width: 1024, height: 768 });
   });
 });
 
@@ -93,7 +146,7 @@ describe("requestImage", () => {
     process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
     globalThis.fetch = async () => response(new Uint8Array([7, 8]), "image/webp");
 
-    const result = await requestImage("a safe prompt", "exterior");
+    const result = await requestImage("a safe prompt", "exterior_street");
     expect(result).not.toBeNull();
     expect(result).toMatchObject({ provider: "cloudflare", model: "@cf/black-forest-labs/flux-1-schnell", mime: "image/webp" });
     expect([...result!.bytes]).toEqual([7, 8]);
@@ -109,12 +162,12 @@ describe("requestImage", () => {
       headers: { "content-type": "application/json" },
     });
 
-    const result = await requestImage("a safe prompt", "exterior");
+    const result = await requestImage("a safe prompt", "exterior_street");
     expect(result).toMatchObject({ provider: "cloudflare", model: "@cf/black-forest-labs/flux-1-schnell", mime: "image/jpeg" });
     expect([...result!.bytes]).toEqual([...jpeg]);
   });
 
-  test("falls back to Pollinations after Cloudflare failure", async () => {
+  test("falls back to Pollinations after Cloudflare failure, with per-view dimensions", async () => {
     process.env.CLOUDFLARE_API_TOKEN = "test-token";
     process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
     const calls: string[] = [];
@@ -125,10 +178,19 @@ describe("requestImage", () => {
       return response(new Uint8Array([9]), "image/jpeg");
     };
 
-    const result = await requestImage("a safe prompt", "interior");
-    expect(result).toMatchObject({ provider: "pollinations", model: "default", mime: "image/jpeg" });
+    // Entrance view falls back to Pollinations with a PORTRAIT canvas.
+    const entrance = await requestImage("a safe prompt", "exterior_entrance");
+    expect(entrance).toMatchObject({ provider: "pollinations", model: "default", mime: "image/jpeg" });
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain("https://image.pollinations.ai/prompt/");
+    expect(calls[1]).toContain("width=768&height=1024");
+    expect(calls[1]).toContain("nologo=true");
+
+    // Street view stays landscape.
+    calls.length = 0;
+    const street = await requestImage("a safe prompt", "exterior_street");
+    expect(street).toMatchObject({ provider: "pollinations" });
+    expect(calls[1]).toContain("width=1024&height=768");
   });
 
   test("returns null when both providers fail", async () => {
@@ -136,6 +198,6 @@ describe("requestImage", () => {
     process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
     globalThis.fetch = async () => new Response("failed", { status: 503 });
 
-    expect(await requestImage("a safe prompt", "exterior")).toBeNull();
+    expect(await requestImage("a safe prompt", "exterior_street")).toBeNull();
   });
 });

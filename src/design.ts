@@ -929,7 +929,7 @@ export async function runDesignStep(
         factsAll.map((f) => ({ key: f.key, value: f.value, confidence: 0.5 })),
         targetUse,
         designContext,
-      ).slice(0, 2);
+      );
       const imageryWork = prompts.map(async (p) => {
         const [cachedImage] =
           await db`SELECT value FROM facts WHERE project_id = ${projectId} AND category = 'imagery' AND key = ${`imagery_${p.view}_prompt_hash`} AND value = ${p.hash} ORDER BY id DESC LIMIT 1`;
@@ -967,7 +967,7 @@ export async function runDesignStep(
       });
       await Promise.race([
         Promise.all(imageryWork),
-        new Promise<void>((resolve) => setTimeout(resolve, 14500)),
+        new Promise<void>((resolve) => setTimeout(resolve, 16000)),
       ]);
     }
     // Real "current property" imagery: geocode + Google Street View embed (or
