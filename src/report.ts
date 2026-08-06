@@ -12,6 +12,7 @@
  * sourceName } for easy lookups; absence is handled explicitly and honestly
  * (e.g. "coverage not established" for a failed provider).
  */
+import { latestFacts } from "./design";
 
 export interface MemoryFact {
   id: string;
@@ -565,7 +566,11 @@ function nearbySection(facts: MemoryFact[]): string {
   </section>`;
 }
 function confidenceSection(facts: MemoryFact[]): string {
-  const low = facts
+  // Facts are append-only history across re-runs; the CURRENT evidence state
+  // is the latest value per key (same latest-wins rule the design section and
+  // deriveBuildingForm use). Never render stale rows from earlier runs.
+  const current = latestFacts(facts);
+  const low = current
     .filter((f) => f.confidence < 0.8)
     .sort((a, b) => a.confidence - b.confidence);
   if (low.length === 0) {
