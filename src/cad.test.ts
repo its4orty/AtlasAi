@@ -1,0 +1,9 @@
+import { describe, expect, test } from "bun:test";
+import { DISCLAIMER, buildCadModel, demoDimensionedCadModel, renderCadSvg, renderDxf, validateCadModel } from "./cad";
+describe("accurate CAD core",()=>{
+ test("writes R12 structure, mm header and all layers",()=>{const d=renderDxf(demoDimensionedCadModel()); expect(d).toContain("AC1009"); expect(d).toContain("$INSUNITS\n70\n4"); for(const l of ["WALLS","OPENINGS","DIMENSIONS","TEXT","FIXTURES","LEVELS","SHOPFRONT","TITLE_BLOCK"]) expect(d).toContain(`\n2\n${l}\n`); expect(d).toContain("SECTION"); expect(d).toContain("ENDSEC"); expect(d).toContain("EOF"); expect(d).toContain("8000 mm"); });
+ test("DXF and SVG share canonical geometry",()=>{const m=demoDimensionedCadModel(),d=renderDxf(m),s=renderCadSvg(m); expect(d).toContain("8000"); expect(s).toContain("800"); expect(s).toContain("500"); expect(s).toContain("8000 mm"); });
+ test("flags unclosed perimeter and contradictory chains",()=>{const m=demoDimensionedCadModel(); m.walls[0].points=m.walls[0].points.slice(0,-1); m.dimensions.push({id:"c1",valueMm:3000,a:{x:0,y:0},b:{x:3000,y:0},type:"chain",sourceRefs:[]},{id:"c2",valueMm:3000,a:{x:3000,y:0},b:{x:6000,y:0},type:"chain",sourceRefs:[]}); m.dimensions[0].valueMm=8000; const v=validateCadModel(m); expect(v.issues.some(x=>x.includes("unclosed"))).toBe(true); expect(v.issues).toContain("dimension chain contradiction"); });
+ test("missing fields are not supplied",()=>{const m=buildCadModel([{name:"Office",width:4,length:5,unit:"m"}]); expect(m.units).toBe("mm"); expect(m.rooms[0].polygon[1].x).toBe(4000); expect(validateCadModel(m).notSupplied).toEqual(expect.arrayContaining(["levels","shopfront elevation","declared accuracy/tolerance"])); expect(m.titleBlock.revision).toBe("not supplied"); });
+ test("mandatory disclaimer is retained",()=>expect(DISCLAIMER).toContain("ATLAS AI did not carry out a measured survey"));
+});
