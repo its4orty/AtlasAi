@@ -10,13 +10,32 @@ export async function lookupFacadeImage(coords: { lat: number; lon: number }): P
   const token = process.env.MAPILLARY_TOKEN?.trim();
   if (!token) return unavailable("no token");
   if (!Number.isFinite(coords.lat) || !Number.isFinite(coords.lon)) return unavailable("invalid coordinates");
-  const d = 0.0007;
-  const url = `https://graph.mapillary.com/images?access_token=${encodeURIComponent(token)}&fields=id,thumb_1024_url,creator,license,computed_geometry&bbox=${coords.lon - d},${coords.lat - d},${coords.lon + d},${coords.lat + d}&limit=10`;
+  // Street-level coverage is sparse and rarely sits inside a 77 m box. Keep
+  // this bounded (rather than scanning a whole town), then choose the image
+  // nearest to the client-confirmed point below.
+  const d = 0.003;
+  const url = `https://graph.mapillary.com/images?access_token=${encodeURIComponent(token)}&fields=id,thumb_1024_url,creator,license,computed_geometry,is_pano&bbox=${coords.lon - d},${coords.lat - d},${coords.lon + d},${coords.lat + d}&limit=10`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) return unavailable("api error");
-    const body = await res.json() as { data?: Array<{ id?: string; thumb_1024_url?: string; creator?: { username?: string; id?: string }; license?: string }> };
-    const item = body.data?.find((x) => x.id && x.thumb_1024_url);
+    const body = await res.json() as { data?: Array<{
+      id?: string;
+      thumb_1024_url?: string;
+      creator?: { username?: string; id?: string };
+      license?: string | null;
+      is_pano?: boolean;
+      computed_geometry?: { coordinates?: [number, number] };
+    }> };
+    // Mapillary's bbox order is west,south,east,north; API ordering is not
+    // geographic, so never use the first result. A pano is preferred only as
+    // a deterministic tie-breaker; distance remains the primary selection.
+    const item = body.data
+      ?.filter((x) => x.id && x.thumb_1024_url && Array.isArray(x.computed_geometry?.coordinates))
+      .map((x) => {
+        const [lon, lat] = x.computed_geometry!.coordinates!;
+        return { x, distance: Math.hypot(lat - coords.lat, lon - coords.lon) };
+      })
+      .sort((a, b) => a.distance - b.distance || Number(Boolean(b.x.is_pano)) - Number(Boolean(a.x.is_pano)))[0]?.x;
     if (!item) return unavailable("no image");
     const creator = item.creator?.username || item.creator?.id || "Mapillary contributor";
     const license = item.license || "CC BY-SA 4.0 (verify provider terms)";
