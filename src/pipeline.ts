@@ -185,6 +185,16 @@ async function epcFetchCertificate(rrn: string, token: string): Promise<Record<s
   }
 }
 
+
+/** Select certificate area, falling back to the EPC register summary row. */
+export function epcAreaFromCertificateOrRegister(cert: Record<string, unknown> | null, row: Record<string, unknown>): { areaM2: number | null; fromRegister: boolean } {
+  const numeric = (value: unknown) => { const n = typeof value === "number" ? value : Number.parseFloat(String(value ?? "")); return Number.isFinite(n) && n > 0 ? n : null; };
+  const certificate = numeric(cert?.total_floor_area ?? cert?.total_floor_area_m2);
+  if (certificate) return { areaM2: certificate, fromRegister: false };
+  const register = numeric(row.floor_area ?? row.floorArea ?? row.floor_area_m2 ?? row.total_floor_area ?? row.totalFloorArea ?? row.total_floor_area_m2);
+  return { areaM2: register, fromRegister: register !== null };
+}
+
 /** Address evidence matching: identifier-level only; street/postcode alone is insufficient. */
 export function addressLines(value: Record<string, unknown> | string): string {
   if (typeof value === "string") return value;
@@ -312,10 +322,23 @@ const discoveryStep: PipelineStepDef = {
           const rrn = String(matched.row.certificateNumber ?? "");
           const cert = rrn ? await epcFetchCertificate(rrn, token) : null;
           const band = String(cert?.current_energy_efficiency_band ?? cert?.asset_rating_band ?? matched.row.currentEnergyEfficiencyBand ?? matched.row.assetRatingBand ?? "").trim();
-          const area = cert?.total_floor_area ?? cert?.total_floor_area_m2;
-          const areaM2 = typeof area === "number" && area > 0 ? String(area) : null;
+          const areaEvidence = epcAreaFromCertificateOrRegister(cert, matched.row);
+          // Some API deployments omit the banded area from the matched search
+          // row. The bounded non-domestic register scan records that same
+          // summary evidence as nearby_*_size_m2; use it as the final fallback.
+          let registerArea = areaEvidence.areaM2;
+          if (registerArea === null && matched.register === "non-domestic") {
+            const [summary] = await ctx.db`SELECT value FROM facts WHERE project_id = ${ctx.projectId} AND category = 'nearby' AND key LIKE 'nearby_%_size_m2' ORDER BY id DESC LIMIT 1`;
+            const n = Number.parseFloat(String(summary?.value ?? ""));
+            if (Number.isFinite(n) && n > 0) registerArea = n;
+          }
+          const areaM2 = registerArea === null ? null : String(registerArea);
+          const fromRegister = areaEvidence.fromRegister || (registerArea !== null && areaEvidence.areaM2 === null);
+          if (fromRegister) {
+            await ctx.db`UPDATE sources SET notes = notes || ${` Certificate provided no exact area; total floor area ${areaM2} m² taken from the EPC register summary row (banded).`} WHERE id = ${sourceId}`;
+          }
           const epcFacts: Array<[string, string, number]> = [];
-          if (areaM2) epcFacts.push(["total_floor_area_m2", areaM2, 0.95]);
+          if (areaM2) epcFacts.push(["total_floor_area_m2", areaM2, fromRegister ? 0.8 : 0.95]);
           if (band) epcFacts.push(["epc_rating", band.toUpperCase(), 0.95]);
           if (rrn) epcFacts.push(["epc_rrn", rrn, 0.95]);
           if (cert?.registration_date) epcFacts.push(["epc_registration_date", String(cert.registration_date), 0.9]);
@@ -934,6 +957,13 @@ export const PIPELINE_STEPS: PipelineStepDef[] = [
 /* ------------------------------------------------------------------ */
 /* Runner                                                              */
 /* ------------------------------------------------------------------ */
+
+export async function runDiscoveryStep(projectId: string): Promise<StepRunResult> {
+  const db = sql();
+  const [project] = await db`SELECT address FROM projects WHERE id = ${projectId}`;
+  if (!project) throw new Error("project not found");
+  return runStep(db, projectId, discoveryStep, String(project.address));
+}
 
 async function runStep(db: Db, projectId: string, step: PipelineStepDef, address: string): Promise<StepRunResult> {
   const [run] = await db`

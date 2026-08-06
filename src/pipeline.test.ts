@@ -24,3 +24,13 @@ describe("EPC address evidence matching", () => {
     expect(epcAddressScore("244 high street croydon", { addressLine1: "246", addressLine2: "HIGH STREET", addressLine3: "CROYDON" }, "domestic")).toBe(0);
   });
 });
+
+import { epcAreaFromCertificateOrRegister } from "./pipeline";
+describe("EPC floor area fallback", () => {
+  test("uses register summary area when certificate has no exact area", () => {
+    expect(epcAreaFromCertificateOrRegister({ total_floor_area: null }, { floorArea: 65 })).toEqual({ areaM2: 65, fromRegister: true });
+  });
+  test("prefers certificate area", () => {
+    expect(epcAreaFromCertificateOrRegister({ total_floor_area: 64 }, { floorArea: 65 })).toEqual({ areaM2: 64, fromRegister: false });
+  });
+});

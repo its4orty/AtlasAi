@@ -20,3 +20,13 @@ describe("deriveBuildingForm", () => {
     expect(deriveBuildingForm("Some address", []).form).toBe("unknown");
   });
 });
+
+describe("latest-wins project facts", () => {
+  test("latestFacts keeps the last row for each key", async () => {
+    const { latestFacts } = await import("./design");
+    expect(latestFacts([{ key: "epc_register_type", value: "domestic" }, { key: "x", value: "1" }, { key: "epc_register_type", value: "non-domestic" }])).toEqual([{ key: "epc_register_type", value: "non-domestic" }, { key: "x", value: "1" }]);
+  });
+  test("newer non-domestic evidence beats an old domestic register fact", () => {
+    expect(deriveBuildingForm("Unit 4 Mill Lane", [fact("epc", "epc_register_type", "domestic"), fact("epc", "epc_property_type", "End-terrace house"), fact("epc", "epc_register_type", "non-domestic"), fact("epc", "epc_property_type", "B8 Storage or Distribution")]).form).toBe("industrial_unit");
+  });
+});

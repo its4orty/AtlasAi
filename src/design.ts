@@ -519,7 +519,17 @@ export interface DesignStepOutput {
 }
 
 export type BuildingForm = "industrial_unit" | "retail_unit" | "house" | "unknown";
+
+/** Append-only project facts are ordered oldest to newest; the last value wins. */
+export function latestFacts<T extends { key: string }>(rows: T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const row of rows) latest.set(row.key, row);
+  return [...latest.values()];
+}
+
 export function deriveBuildingForm(address: string, facts: Array<{category:string; key:string; value:string}>): { form: BuildingForm; note: string } {
+  facts = latestFacts(facts);
+
   const text = `${address} ${facts.map(f => f.value).join(" ")}`.toLowerCase();
   const unit = /\b(unit|suite|workshop|business park|industrial estate|warehouse|mill|plot)\b/.test(address.toLowerCase());
   const register = facts.find(f=>f.category === "epc" && f.key === "epc_register_type")?.value.toLowerCase();
@@ -552,8 +562,8 @@ export async function runDesignStep(db: Db, projectId: string, targetUse: string
     if (!proj) throw new Error("project not found");
 
     const rows = await db`
-      SELECT category, key, value FROM facts WHERE project_id = ${projectId}`;
-    const factsAll = rows.map((r) => ({ category: String(r.category), key: String(r.key), value: String(r.value) }));
+      SELECT category, key, value FROM facts WHERE project_id = ${projectId} ORDER BY id`;
+    const factsAll = latestFacts(rows.map((r) => ({ category: String(r.category), key: String(r.key), value: String(r.value) })));
     const building = deriveBuildingForm(String(proj.address), factsAll);
     const intel = factsAll.filter((f) => f.category === "intelligence");
     // Floor area: uploaded-document evidence wins; the EPC register fact
