@@ -71,4 +71,32 @@ describe("lookupFacadeImage", () => {
       else delete process.env.MAPILLARY_TOKEN;
     }
   });
+  test("uses the nearest image in the widened bbox (and leaves empty coverage honest)", async () => {
+    const hadToken = process.env.MAPILLARY_TOKEN;
+    const hadFetch = globalThis.fetch;
+    process.env.MAPILLARY_TOKEN = "test-token";
+    const requested: string[] = [];
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requested.push(url);
+        return new Response(JSON.stringify({ data: [
+          { id: "far", thumb_1024_url: "https://img/far", creator: { id: "f" }, computed_geometry: { coordinates: [-0.101, 51.401] } },
+          { id: "near", thumb_1024_url: "https://img/near", creator: { id: "n" }, computed_geometry: { coordinates: [-0.1001, 51.4001] } },
+        ] }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const r = await lookupFacadeImage({ lat: 51.4, lon: -0.1 });
+      expect(r.status).toBe("available");
+      if (r.status === "available") expect(r.imageId).toBe("near");
+      expect(requested[0]).toMatch(/bbox=-0\.103(?:00000000000001)?,51\.397,-0\.097,51\.403/);
+
+      globalThis.fetch = (async () => new Response(JSON.stringify({ data: [] }), { status: 200 })) as typeof fetch;
+      expect(await lookupFacadeImage({ lat: 51.4, lon: -0.1 })).toEqual({ status: "unavailable", reason: "no image" });
+    } finally {
+      globalThis.fetch = hadFetch;
+      if (hadToken !== undefined) process.env.MAPILLARY_TOKEN = hadToken;
+      else delete process.env.MAPILLARY_TOKEN;
+    }
+  });
+
 });
