@@ -35,7 +35,7 @@ export async function getPreviewImageBytes(
   ext: string,
 ): Promise<PreviewImageResult | null> {
   try {
-    if (!/^\d+$/.test(projectId) || !/^[a-z0-9-]+$/i.test(view)) return null;
+    if (!/^\d+$/.test(projectId) || !/^[a-z0-9_-]+$/i.test(view)) return null;
     if (!/^[a-z0-9]+$/i.test(ext)) return null;
     const cachePath = path.join(PROJECT_IMAGES_DIR, projectId, `${view}.preview.jpg`);
     const cached = await readFile(cachePath).catch(() => null);
