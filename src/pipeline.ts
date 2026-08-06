@@ -202,10 +202,10 @@ export function addressLines(value: Record<string, unknown> | string): string {
 }
 function normAddr(s: string): string { return s.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim(); }
 function houseNumber(s: string): string { const m = normAddr(s).match(/(?:^| )(#?\d+[A-Z]?(?:-\d+[A-Z]?)?)(?: |$)/); return m ? m[1].replace(/^#/, "") : ""; }
-function unitId(s: string): string { const m = normAddr(s).match(/\b(?:UNIT|SUITE|WORKSHOP|PLOT|UNITED)\s*([A-Z]?\d+[A-Z]?)\b/); return m ? m[1] : ""; }
+function unitId(s: string): string { const m = normAddr(s).match(/\b(?:UNIT|SUITE|WORKSHOP|PLOT)\s*([A-Z]?\d+[A-Z]?)\b/); return m ? m[1] : ""; }
 function buildingName(s: string): string { const m = normAddr(s).match(/\b([A-Z0-9]+\s+(?:BUSINESS|INDUSTRIAL)\s+PARK|[A-Z0-9]+\s+MILL)\b/); return m ? m[1] : ""; }
 function streetTokens(s: string): string[] { return normAddr(s).split(/\s+/).filter(x => x.length > 2 && !/^\d/.test(x) && !/^(UNIT|SUITE|WORKSHOP|PLOT|BUSINESS|INDUSTRIAL|PARK|ESTATE)$/.test(x)); }
-function hasCommercialToken(s: string): boolean { return /\b(UNIT|SUITE|WORKSHOP|BUSINESS PARK|INDUSTRIAL ESTATE|WAREHOUSE|STUDIO|MILL|PLOT)\b/i.test(s); }
+function hasCommercialToken(s: string): boolean { return /\b(UNIT|SUITE|WORKSHOP|BUSINESS PARK|INDUSTRIAL ESTATE|WAREHOUSE|STUDIO|PLOT)\b/i.test(s); }
 /** Scores only genuine identifier agreement at/above the 0.7 threshold. */
 export function epcAddressScore(projectAddr: string, row: Record<string, unknown>, register?: "domestic"|"non-domestic"): number {
   const proj=normAddr(projectAddr), cand=normAddr(addressLines(row)); if (!cand) return 0;

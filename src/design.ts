@@ -531,7 +531,7 @@ export function deriveBuildingForm(address: string, facts: Array<{category:strin
   facts = latestFacts(facts);
 
   const text = `${address} ${facts.map(f => f.value).join(" ")}`.toLowerCase();
-  const unit = /\b(unit|suite|workshop|business park|industrial estate|warehouse|mill|plot)\b/.test(address.toLowerCase());
+  const unit = /\b(unit|suite|workshop|business park|industrial estate|warehouse|plot)\b/.test(address.toLowerCase());
   const register = facts.find(f=>f.category === "epc" && f.key === "epc_register_type")?.value.toLowerCase();
   const prop = facts.find(f=>f.category === "epc" && f.key === "epc_property_type")?.value.toLowerCase() ?? "";
   const use = facts.find(f=>/use_class|nearby.*class/i.test(f.key))?.value.toLowerCase() ?? "";

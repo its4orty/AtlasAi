@@ -23,6 +23,12 @@ describe("EPC address evidence matching", () => {
     expect(epcAddressScore("244 high street croydon", { addressLine1: "244", addressLine2: "HIGH STREET", addressLine3: "CROYDON" }, "domestic")).toBe(1);
     expect(epcAddressScore("244 high street croydon", { addressLine1: "246", addressLine2: "HIGH STREET", addressLine3: "CROYDON" }, "domestic")).toBe(0);
   });
+  test("a house on Mill Lane matches the domestic register (MILL is a street name, not a commercial token)", () => {
+    expect(epcAddressScore("24 mill lane croydon", { addressLine1: "24", addressLine2: "MILL LANE", postcode: "CR0 4AA" }, "domestic")).toBe(1);
+  });
+  test("regression: Unit 4 on Mill Lane still matches the non-domestic register via the UNIT token", () => {
+    expect(epcAddressScore("unit 4 mill lane croydon", { addressLine1: "Unit 4", addressLine2: "JAMES BUSINESS PARK", addressLine3: "MILL LANE", postcode: "CR0 4AA" }, "non-domestic")).toBe(1);
+  });
 });
 
 import { epcAreaFromCertificateOrRegister } from "./pipeline";

@@ -16,6 +16,9 @@ describe("deriveBuildingForm", () => {
   test("identifies a plain domestic house", () => {
     expect(deriveBuildingForm("244 High Street", [fact("epc", "epc_register_type", "domestic"), fact("epc", "epc_property_type", "End-terrace house")]).form).toBe("house");
   });
+  test("a house on Mill Lane is a house, not an industrial unit (mill is a street name)", () => {
+    expect(deriveBuildingForm("24 mill lane croydon", [fact("epc", "epc_register_type", "domestic"), fact("epc", "epc_property_type", "End-terrace house")]).form).toBe("house");
+  });
   test("is unknown without evidence", () => {
     expect(deriveBuildingForm("Some address", []).form).toBe("unknown");
   });
