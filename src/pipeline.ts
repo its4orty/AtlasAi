@@ -203,7 +203,7 @@ export function epcAddressScore(projectAddr: string, row: Record<string, unknown
   if ((pUnit || cUnit) && pUnit !== cUnit) return 0;
   const pStreet=streetTokens(proj), cStreet=streetTokens(cand);
   const streetMatch=pStreet.some(t=>cStreet.includes(t)); if (!streetMatch) return 0;
-  if (!pUnit && !cUnit) { const pn=houseNumber(proj), cn=houseNumber(cand); if (!pn || !cn || !numbersOverlap(pn,cn)) return 0.55; return hasCommercialToken(proj) && register === "domestic" ? 0.4 : 1; }
+  if (!pUnit && !cUnit) { const pn=houseNumber(proj), cn=houseNumber(cand); if (pn && cn && !numbersOverlap(pn,cn)) return 0; if (!pn || !cn) return 0.55; return hasCommercialToken(proj) && register === "domestic" ? 0.4 : 1; }
   if (pUnit && cUnit && pUnit===cUnit) return hasCommercialToken(proj) && register === "non-domestic" ? 1 : 0.9;
   return 0;
 }

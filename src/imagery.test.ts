@@ -39,6 +39,15 @@ describe("buildRenderPrompts", () => {
     }
   });
 
+  test("industrial form is explicit and unknown form stays conservative", () => {
+    const industrial = buildRenderPrompts([], "barber shop", { buildingForm: "industrial_unit" }).find((p) => p.view === "exterior")!;
+    expect(industrial.prompt).toContain("industrial unit");
+    expect(industrial.prompt).not.toContain("street-facing commercial premises");
+    const unknown = buildRenderPrompts([], "barber shop", {}).find((p) => p.view === "exterior")!;
+    expect(unknown.prompt).toContain("ground floor only");
+    expect(unknown.prompt).not.toContain("shopfront");
+  });
+
   test("design-aware prompts describe the DESIGNED layout and stay privacy-safe", () => {
     // Project with NO source documents: only an address fact exists, so the
     // spatial evidence brief is empty — the designed conversion context must
