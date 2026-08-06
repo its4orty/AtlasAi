@@ -441,6 +441,7 @@ function designSection(facts: MemoryFact[]): string {
   const allocated = d.get("design_allocated_m2")?.value;
   const circulation = d.get("design_circulation_pct")?.value;
   const assumptions = d.get("design_assumptions")?.value;
+  const buildingForm = d.get("building_form")?.value ?? "unknown";
   const imagery = ["exterior", "interior"].map(view => ({ view, url: d.get(`imagery_${view}_url`)?.value, status: d.get(`imagery_${view}_status`)?.value, provider: d.get(`imagery_${view}_provider`)?.value, model: d.get(`imagery_${view}_model`)?.value })).filter(x => x.url && x.status === "generated");
 
   let zonesHtml = "";
@@ -470,7 +471,7 @@ function designSection(facts: MemoryFact[]): string {
   return `<section>
     <h2><span class="num">7</span>Concept design — convert to ${esc(programLabel)}</h2>
     <p class="lede">An indicative zoning concept generated from the space facts in project memory (room dimensions, labels, floor area). It is a screening sketch — <strong>not a professional design, not for construction</strong>, and no planning or statutory compliance has been checked.</p>
-    ${totalArea ? `<p class="note">Floor area used: ${esc(totalArea)} m² · allocated to zones: ${esc(allocated ?? "—")} m² · circulation: ${esc(circulation ?? "—")}%${generatedAt ? ` · generated ${fmtDate(generatedAt.slice(0, 10))}` : ""}.</p>` : ""}
+    ${`<p class="note"><strong>Building form (evidence):</strong> ${esc(buildingForm)}</p>`}${totalArea ? `<p class="note">Floor area used: ${esc(totalArea)} m² · allocated to zones: ${esc(allocated ?? "—")} m² · circulation: ${esc(circulation ?? "—")}%${generatedAt ? ` · generated ${fmtDate(generatedAt.slice(0, 10))}` : ""}.</p>` : ""}
     ${svg ? `<div class="design-svg"><p class="note"><strong>Concept design — 2D plan</strong></p>${svg}</div>` : ""}
     ${axoSvg ? `<div class="design-svg"><p class="note"><strong>3D-style view (indicative, not photorealistic)</strong></p>${axoSvg}<p class="note caveat">Schematic extrusion from the same project-memory room evidence, not a surveyed or photorealistic render. This concept remains indicative and not for construction.</p></div>` : ""}
     ${d.get("facade_svg")?.value ? `<div class="design-svg"><h3 class="sub">Front elevation (schematic)</h3>${d.get("facade_svg")?.value}<p class="note caveat">Schematic facade elevation — inferred from a single image; not a measured survey.</p>${d.get("facade_attribution")?.value ? `<p class="note">Reference image credit: ${esc(d.get("facade_attribution")!.value)}</p>` : ""}</div>` : `<div class="flag warn"><h3 class="sub">Front elevation (schematic)</h3><p class="note caveat">No licensed street-level image available at this location — facade reference not generated. This report never fabricates a facade.</p></div>`}

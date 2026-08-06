@@ -185,44 +185,39 @@ async function epcFetchCertificate(rrn: string, token: string): Promise<Record<s
   }
 }
 
-/** Uppercase, punctuation-collapsed address fragment for comparison. */
-function normAddr(s: string): string {
-  return s.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+
+/** Select certificate area, falling back to the EPC register summary row. */
+export function epcAreaFromCertificateOrRegister(cert: Record<string, unknown> | null, row: Record<string, unknown>): { areaM2: number | null; fromRegister: boolean } {
+  const numeric = (value: unknown) => { const n = typeof value === "number" ? value : Number.parseFloat(String(value ?? "")); return Number.isFinite(n) && n > 0 ? n : null; };
+  const certificate = numeric(cert?.total_floor_area ?? cert?.total_floor_area_m2);
+  if (certificate) return { areaM2: certificate, fromRegister: false };
+  const register = numeric(row.floor_area ?? row.floorArea ?? row.floor_area_m2 ?? row.total_floor_area ?? row.totalFloorArea ?? row.total_floor_area_m2);
+  return { areaM2: register, fromRegister: register !== null };
 }
-/** Leading house number or range ("244", "242-244"), or "" if none. */
-function houseNumber(s: string): string {
-  const m = normAddr(s).match(/^(\d+[A-Z]?(?:-\d+[A-Z]?)?)/);
-  return m ? m[1] : "";
+
+/** Address evidence matching: identifier-level only; street/postcode alone is insufficient. */
+export function addressLines(value: Record<string, unknown> | string): string {
+  if (typeof value === "string") return value;
+  return ["addressLine1", "addressLine2", "addressLine3", "addressLine4", "addressLine5", "postcode"].map(k => String(value[k] ?? "")).filter(Boolean).join(" ");
 }
-/** Street name from a register row (address minus leading number). */
-function streetName(s: string): string {
-  return normAddr(s).replace(/^\d+[A-Z]?(?:-\d+[A-Z]?)?\s*/, "").split(",")[0].trim();
+function normAddr(s: string): string { return s.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim(); }
+function houseNumber(s: string): string { const m = normAddr(s).match(/(?:^| )(#?\d+[A-Z]?(?:-\d+[A-Z]?)?)(?: |$)/); return m ? m[1].replace(/^#/, "") : ""; }
+function unitId(s: string): string { const m = normAddr(s).match(/\b(?:UNIT|SUITE|WORKSHOP|PLOT|UNITED)\s*([A-Z]?\d+[A-Z]?)\b/); return m ? m[1] : ""; }
+function buildingName(s: string): string { const m = normAddr(s).match(/\b([A-Z0-9]+\s+(?:BUSINESS|INDUSTRIAL)\s+PARK|[A-Z0-9]+\s+MILL)\b/); return m ? m[1] : ""; }
+function streetTokens(s: string): string[] { return normAddr(s).split(/\s+/).filter(x => x.length > 2 && !/^\d/.test(x) && !/^(UNIT|SUITE|WORKSHOP|PLOT|BUSINESS|INDUSTRIAL|PARK|ESTATE)$/.test(x)); }
+function hasCommercialToken(s: string): boolean { return /\b(UNIT|SUITE|WORKSHOP|BUSINESS PARK|INDUSTRIAL ESTATE|WAREHOUSE|STUDIO|MILL|PLOT)\b/i.test(s); }
+/** Scores only genuine identifier agreement at/above the 0.7 threshold. */
+export function epcAddressScore(projectAddr: string, row: Record<string, unknown>, register?: "domestic"|"non-domestic"): number {
+  const proj=normAddr(projectAddr), cand=normAddr(addressLines(row)); if (!cand) return 0;
+  const pUnit=unitId(proj), cUnit=unitId(cand);
+  if ((pUnit || cUnit) && pUnit !== cUnit) return 0;
+  const pStreet=streetTokens(proj), cStreet=streetTokens(cand);
+  const streetMatch=pStreet.some(t=>cStreet.includes(t)); if (!streetMatch) return 0;
+  if (!pUnit && !cUnit) { const pn=houseNumber(proj), cn=houseNumber(cand); if (pn && cn && !numbersOverlap(pn,cn)) return 0; if (!pn || !cn) return 0.55; return hasCommercialToken(proj) && register === "domestic" ? 0.4 : 1; }
+  if (pUnit && cUnit && pUnit===cUnit) return hasCommercialToken(proj) && register === "non-domestic" ? 1 : 0.9;
+  return 0;
 }
-function numbersOverlap(a: string, b: string): boolean {
-  if (!a || !b) return false;
-  const parse = (x: string) => x.split("-").map((n) => parseInt(n, 10));
-  const [a1, a2] = parse(a);
-  const [b1, b2] = parse(b);
-  const ar = [Math.min(a1, a2 ?? a1), Math.max(a1, a2 ?? a1)];
-  const br = [Math.min(b1, b2 ?? b1), Math.max(b1, b2 ?? b1)];
-  return ar[0] <= br[1] && br[0] <= ar[1];
-}
-/**
- * 0..1 match score between the project address and a register summary row.
- * 1 = same street + overlapping house number; 0.7 = same street, number unknown;
- * 0 = different street (or nothing to compare).
- */
-function epcAddressScore(projectAddr: string, row: Record<string, unknown>): number {
-  const proj = normAddr(projectAddr).replace(/\b[A-Z]{1,2}\d[A-Z0-9]?\s?\d[A-Z]{2}\b/, " ");
-  const cand = normAddr(`${String(row.addressLine1 ?? "")} ${String(row.addressLine2 ?? "")}`);
-  if (!cand) return 0;
-  const cStreet = streetName(cand);
-  if (!cStreet || !proj.includes(cStreet)) return 0;
-  const pNum = houseNumber(proj);
-  const cNum = houseNumber(cand);
-  if (!pNum || !cNum) return 0.7;
-  return numbersOverlap(pNum, cNum) ? 1 : 0;
-}
+function numbersOverlap(a: string,b: string): boolean { const parse=(x:string)=>x.split("-").map(n=>parseInt(n,10)); const [a1,a2]=parse(a),[b1,b2]=parse(b); return Math.min(a1,a2||a1)<=Math.max(b1,b2||b1)&&Math.min(b1,b2||b1)<=Math.max(a1,a2||a1); }
 
 /** REAL step — free, evidence-backed screening lookups. Each provider is isolated. */
 const discoveryStep: PipelineStepDef = {
@@ -304,15 +299,15 @@ const discoveryStep: PipelineStepDef = {
         // Score every row against the project address; best score wins.
         let best: { row: Record<string, unknown>; score: number; register: "domestic" | "non-domestic" } | null = null;
         for (const row of domestic) {
-          const score = epcAddressScore(projectAddr, row);
+          const score = epcAddressScore(projectAddr, row, "domestic");
           if (score > (best?.score ?? 0)) best = { row, score, register: "domestic" };
         }
         for (const row of nonDomestic) {
-          const score = epcAddressScore(projectAddr, row);
+          const score = epcAddressScore(projectAddr, row, "non-domestic");
           if (score > (best?.score ?? 0)) best = { row, score, register: "non-domestic" };
         }
         const matched = best && best.score >= 0.7 ? best : null;
-        const matchedAddr = `${String(matched?.row.addressLine1 ?? "")} ${String(matched?.row.addressLine2 ?? "")}`.trim();
+        const matchedAddr = matched ? addressLines(matched.row) : "";
         const note = matched
           ? `EPC register searched by postcode ${postcode}: ${domestic.length} domestic and ${nonDomestic.length} non-domestic certificate(s) returned; matched "${matchedAddr}" (${matched.register} register, ${String(matched.row.registrationDate ?? "date unknown")}).`
           : `EPC register searched by postcode ${postcode}: ${domestic.length} domestic and ${nonDomestic.length} non-domestic certificate(s) returned, none matching "${projectAddr}". No EPC evidence from the register — absence is recorded honestly, not as a finding.`;
@@ -321,15 +316,29 @@ const discoveryStep: PipelineStepDef = {
           ["epc_domestic_count", String(domestic.length), 0.8],
           ["epc_non_domestic_count", String(nonDomestic.length), 0.8],
           ["epc_found", matched ? "yes" : "no", 0.9],
+          ["epc_address_matched", matched ? "yes" : "no", matched ? 0.9 : 1],
         ]);
         if (matched) {
           const rrn = String(matched.row.certificateNumber ?? "");
           const cert = rrn ? await epcFetchCertificate(rrn, token) : null;
           const band = String(cert?.current_energy_efficiency_band ?? cert?.asset_rating_band ?? matched.row.currentEnergyEfficiencyBand ?? matched.row.assetRatingBand ?? "").trim();
-          const area = cert?.total_floor_area ?? cert?.total_floor_area_m2;
-          const areaM2 = typeof area === "number" && area > 0 ? String(area) : null;
+          const areaEvidence = epcAreaFromCertificateOrRegister(cert, matched.row);
+          // Some API deployments omit the banded area from the matched search
+          // row. The bounded non-domestic register scan records that same
+          // summary evidence as nearby_*_size_m2; use it as the final fallback.
+          let registerArea = areaEvidence.areaM2;
+          if (registerArea === null && matched.register === "non-domestic") {
+            const [summary] = await ctx.db`SELECT value FROM facts WHERE project_id = ${ctx.projectId} AND category = 'nearby' AND key LIKE 'nearby_%_size_m2' ORDER BY id DESC LIMIT 1`;
+            const n = Number.parseFloat(String(summary?.value ?? ""));
+            if (Number.isFinite(n) && n > 0) registerArea = n;
+          }
+          const areaM2 = registerArea === null ? null : String(registerArea);
+          const fromRegister = areaEvidence.fromRegister || (registerArea !== null && areaEvidence.areaM2 === null);
+          if (fromRegister) {
+            await ctx.db`UPDATE sources SET notes = notes || ${` Certificate provided no exact area; total floor area ${areaM2} m² taken from the EPC register summary row (banded).`} WHERE id = ${sourceId}`;
+          }
           const epcFacts: Array<[string, string, number]> = [];
-          if (areaM2) epcFacts.push(["total_floor_area_m2", areaM2, 0.95]);
+          if (areaM2) epcFacts.push(["total_floor_area_m2", areaM2, fromRegister ? 0.8 : 0.95]);
           if (band) epcFacts.push(["epc_rating", band.toUpperCase(), 0.95]);
           if (rrn) epcFacts.push(["epc_rrn", rrn, 0.95]);
           if (cert?.registration_date) epcFacts.push(["epc_registration_date", String(cert.registration_date), 0.9]);
@@ -340,7 +349,7 @@ const discoveryStep: PipelineStepDef = {
           const ratingNum = cert?.energy_rating_current ?? cert?.asset_rating_current;
           if (typeof ratingNum === "number") epcFacts.push(["epc_energy_rating_current", String(ratingNum), 0.9]);
           epcFacts.push(["epc_register_type", matched.register, 1]);
-          epcFacts.push(["epc_address_matched", "yes", 0.9]);
+
           // EPC facts land in category 'epc' under the same source row so the
           // report's space-evidence row and the feasibility per-m² model can
           // consume them, exactly like an uploaded EPC would.
@@ -948,6 +957,13 @@ export const PIPELINE_STEPS: PipelineStepDef[] = [
 /* ------------------------------------------------------------------ */
 /* Runner                                                              */
 /* ------------------------------------------------------------------ */
+
+export async function runDiscoveryStep(projectId: string): Promise<StepRunResult> {
+  const db = sql();
+  const [project] = await db`SELECT address FROM projects WHERE id = ${projectId}`;
+  if (!project) throw new Error("project not found");
+  return runStep(db, projectId, discoveryStep, String(project.address));
+}
 
 async function runStep(db: Db, projectId: string, step: PipelineStepDef, address: string): Promise<StepRunResult> {
   const [run] = await db`
