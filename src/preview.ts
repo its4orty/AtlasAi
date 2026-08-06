@@ -58,15 +58,25 @@ function latest(category: string, facts: MemoryFact[]): Map<string, string> {
 
 export interface PreviewImage {
   view: string;
+  /** Human-readable view label for captions. */
+  label: string;
   /** Downscaled, watermarked preview URL — never the clean full-res file. */
   previewUrl: string;
 }
+
+/** Display order + captions for the four concept render views. */
+export const PREVIEW_VIEWS: Array<{ view: string; label: string }> = [
+  { view: "exterior_street", label: "Street context (exterior)" },
+  { view: "exterior_elevation", label: "Front elevation (exterior)" },
+  { view: "exterior_entrance", label: "Entrance detail (exterior)" },
+  { view: "interior", label: "Interior" },
+];
 
 /** The generated renders that have a real file behind them (status "generated"). */
 export function previewImages(memory: ProjectMemoryLike): PreviewImage[] {
   const im = latest("imagery", memory.facts);
   const out: PreviewImage[] = [];
-  for (const view of ["exterior", "interior"]) {
+  for (const { view, label } of PREVIEW_VIEWS) {
     const url = im.get(`imagery_${view}_url`);
     const status = im.get(`imagery_${view}_status`);
     if (!url || status !== "generated") continue;
@@ -75,7 +85,7 @@ export function previewImages(memory: ProjectMemoryLike): PreviewImage[] {
       "$1.preview.$2",
     );
     // Only accept URLs that actually transformed — never leak a clean URL.
-    if (previewUrl !== url) out.push({ view, previewUrl });
+    if (previewUrl !== url) out.push({ view, label, previewUrl });
   }
   return out;
 }
@@ -129,9 +139,9 @@ export function renderPreviewHtml(memory: ProjectMemoryLike): string | null {
   const figures = images
     .map(
       (img) => `<figure class="preview-media">
-  <img src="${esc(img.previewUrl)}" alt="AI-generated ${img.view} concept visualisation — preview" draggable="false"/>
+  <img src="${esc(img.previewUrl)}" alt="AI-generated ${esc(img.label)} concept visualisation — preview" draggable="false"/>
   <div class="watermark" aria-hidden="true"><span>${WATERMARK_TEXT}</span></div>
-  <figcaption>${img.view === "exterior" ? "Exterior" : "Interior"} concept visualisation · <strong>Click to unlock</strong></figcaption>
+  <figcaption>${esc(img.label)} concept visualisation · <strong>Click to unlock</strong></figcaption>
 </figure>`,
     )
     .join("\n");

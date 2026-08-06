@@ -37,8 +37,12 @@ const WITH_IMAGERY: Array<[string, string, string]> = [
   ["design", "design_target_use", "gym"],
   ["design", "design_total_floor_area_m2", "120"],
   ["design", "design_rooms_count", "3"],
-  ["imagery", "imagery_exterior_status", "generated"],
-  ["imagery", "imagery_exterior_url", "/project-images/25/exterior.jpg"],
+  ["imagery", "imagery_exterior_street_status", "generated"],
+  ["imagery", "imagery_exterior_street_url", "/project-images/25/exterior_street.jpg"],
+  ["imagery", "imagery_exterior_elevation_status", "generated"],
+  ["imagery", "imagery_exterior_elevation_url", "/project-images/25/exterior_elevation.jpg"],
+  ["imagery", "imagery_exterior_entrance_status", "generated"],
+  ["imagery", "imagery_exterior_entrance_url", "/project-images/25/exterior_entrance.jpg"],
   ["imagery", "imagery_interior_status", "generated"],
   ["imagery", "imagery_interior_url", "/project-images/25/interior.jpg"],
   ["imagery", "imagery_streetview_status", "embed"],
@@ -53,14 +57,16 @@ describe("hasPreviewImagery / previewImages", () => {
   test("true when generated exterior/interior renders exist", () => {
     expect(hasPreviewImagery(memory(WITH_IMAGERY))).toBe(true);
     expect(previewImages(memory(WITH_IMAGERY))).toEqual([
-      { view: "exterior", previewUrl: "/project-images/25/exterior.preview.jpg" },
-      { view: "interior", previewUrl: "/project-images/25/interior.preview.jpg" },
+      { view: "exterior_street", label: "Street context (exterior)", previewUrl: "/project-images/25/exterior_street.preview.jpg" },
+      { view: "exterior_elevation", label: "Front elevation (exterior)", previewUrl: "/project-images/25/exterior_elevation.preview.jpg" },
+      { view: "exterior_entrance", label: "Entrance detail (exterior)", previewUrl: "/project-images/25/exterior_entrance.preview.jpg" },
+      { view: "interior", label: "Interior", previewUrl: "/project-images/25/interior.preview.jpg" },
     ]);
   });
   test("false when renders exist but were not generated", () => {
     const m = memory([
-      ["imagery", "imagery_exterior_status", "skipped"],
-      ["imagery", "imagery_exterior_url", "/project-images/25/exterior.jpg"],
+      ["imagery", "imagery_exterior_street_status", "skipped"],
+      ["imagery", "imagery_exterior_street_url", "/project-images/25/exterior_street.jpg"],
     ]);
     expect(hasPreviewImagery(m)).toBe(false);
     expect(previewImages(m)).toEqual([]);
@@ -70,8 +76,8 @@ describe("hasPreviewImagery / previewImages", () => {
   });
   test("never rewrites a URL that does not match the project-images pattern", () => {
     const m = memory([
-      ["imagery", "imagery_exterior_status", "generated"],
-      ["imagery", "imagery_exterior_url", "https://example.com/clean.jpg"],
+      ["imagery", "imagery_exterior_street_status", "generated"],
+      ["imagery", "imagery_exterior_street_url", "https://example.com/clean.jpg"],
     ]);
     expect(previewImages(m)).toEqual([]);
   });
@@ -109,9 +115,13 @@ describe("renderPreviewHtml — the preview page", () => {
   });
 
   test("shows the watermarked preview image URLs — never the clean full-res files", () => {
-    expect(html).toContain("/project-images/25/exterior.preview.jpg");
+    expect(html).toContain("/project-images/25/exterior_street.preview.jpg");
+    expect(html).toContain("/project-images/25/exterior_elevation.preview.jpg");
+    expect(html).toContain("/project-images/25/exterior_entrance.preview.jpg");
     expect(html).toContain("/project-images/25/interior.preview.jpg");
-    expect(html).not.toContain("/project-images/25/exterior.jpg");
+    expect(html).not.toContain("/project-images/25/exterior_street.jpg");
+    expect(html).not.toContain("/project-images/25/exterior_elevation.jpg");
+    expect(html).not.toContain("/project-images/25/exterior_entrance.jpg");
     expect(html).not.toContain("/project-images/25/interior.jpg");
   });
 
@@ -146,7 +156,9 @@ describe("full report (token path) is unchanged", () => {
     expect(html).toContain("78 Godson Road, Croydon");
     expect(html).toContain("Feasibility");
     // Clean full-res image paths (the route appends ?token= at serve time):
-    expect(html).toContain("/project-images/25/exterior.jpg");
+    expect(html).toContain("/project-images/25/exterior_street.jpg");
+    expect(html).toContain("/project-images/25/exterior_elevation.jpg");
+    expect(html).toContain("/project-images/25/exterior_entrance.jpg");
     expect(html).toContain("/project-images/25/interior.jpg");
     // No preview machinery leaks into the paid report:
     expect(html).not.toContain("watermark");

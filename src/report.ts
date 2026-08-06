@@ -443,7 +443,14 @@ function designSection(facts: MemoryFact[]): string {
   const circulation = d.get("design_circulation_pct")?.value;
   const assumptions = d.get("design_assumptions")?.value;
   const buildingForm = d.get("building_form")?.value ?? "unknown";
-  const imagery = ["exterior", "interior"].map(view => ({ view, url: d.get(`imagery_${view}_url`)?.value, status: d.get(`imagery_${view}_status`)?.value, provider: d.get(`imagery_${view}_provider`)?.value, model: d.get(`imagery_${view}_model`)?.value })).filter(x => x.url && x.status === "generated");
+  // All three exterior views plus the interior, in a stable display order.
+  const IMAGERY_VIEWS: Array<{ view: string; label: string }> = [
+    { view: "exterior_street", label: "Street context (exterior)" },
+    { view: "exterior_elevation", label: "Front elevation (exterior)" },
+    { view: "exterior_entrance", label: "Entrance detail (exterior)" },
+    { view: "interior", label: "Interior" },
+  ];
+  const imagery = IMAGERY_VIEWS.map(({ view, label }) => ({ view, label, url: d.get(`imagery_${view}_url`)?.value, status: d.get(`imagery_${view}_status`)?.value, provider: d.get(`imagery_${view}_provider`)?.value, model: d.get(`imagery_${view}_model`)?.value })).filter(x => x.url && x.status === "generated");
 
   let zonesHtml = "";
   const zonesRaw = d.get("design_zones")?.value;
@@ -478,7 +485,7 @@ function designSection(facts: MemoryFact[]): string {
     ${d.get("facade_svg")?.value ? `<div class="design-svg"><h3 class="sub">Front elevation (schematic)</h3>${d.get("facade_svg")?.value}<p class="note caveat">Schematic facade elevation — inferred from a single image; not a measured survey.</p>${d.get("facade_attribution")?.value ? `<p class="note">Reference image credit: ${esc(d.get("facade_attribution")!.value)}</p>` : ""}</div>` : `<div class="flag warn"><h3 class="sub">Front elevation (schematic)</h3><p class="note caveat">No licensed street-level image available at this location — facade reference not generated. This report never fabricates a facade.</p></div>`}
     ${zonesHtml ? `<h3 class="sub">Proposed zones</h3>${zonesHtml}` : ""}
     ${assumptions ? `<p class="note caveat">${esc(assumptions)}</p>` : ""}
-    ${imagery.length ? `<div class="imagery"><h3 class="sub">Photorealistic concept visualisations</h3>${imagery.map(i => `<figure><img src="${esc(i.url)}" alt="AI-generated ${i.view} concept visualisation"/><figcaption>AI-generated concept visualisation — not a photograph of the property. ${esc(i.view)} view; provider ${esc(i.provider ?? "unknown")}, model ${esc(i.model ?? "unknown")}.</figcaption></figure>`).join("")}<p class="note caveat">Images are generated from the project's confidence-scored spatial brief and target use; they are illustrative concepts, not surveyed or verified photography.</p></div>` : ""}
+    ${imagery.length ? `<div class="imagery"><h3 class="sub">Photorealistic concept visualisations</h3>${imagery.map(i => `<figure><img src="${esc(i.url)}" alt="AI-generated ${esc(i.label)} concept visualisation"/><figcaption>AI-generated concept visualisation — not a photograph of the property. ${esc(i.label)}; provider ${esc(i.provider ?? "unknown")}, model ${esc(i.model ?? "unknown")}.</figcaption></figure>`).join("")}<p class="note caveat">Images are generated from the project's confidence-scored spatial brief and target use; they are illustrative concepts, not surveyed or verified photography.</p></div>` : ""}
     ${complianceBlock(compliance)}
   </section>`;
 }
@@ -679,7 +686,9 @@ ul.review li:before{content:"!";position:absolute;left:14px;top:9px;color:var(--
 .design-svg{margin:14px 0;padding:12px;background:#fff;border:1px solid var(--line)}
 .design-svg svg, .imagery img{width:100%;height:auto;display:block}
 /* Imagery figures (AI concept renders + real Street View) */
-.imagery figure, figure.sv{margin:14px 0;background:#fff;border:1px solid var(--line);padding:10px}
+.imagery{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;align-items:start}
+.imagery figure{margin:0;background:#fff;border:1px solid var(--line);padding:10px}
+figure.sv{margin:14px 0;background:#fff;border:1px solid var(--line);padding:10px}
 .imagery figcaption, figure.sv figcaption{font-size:11.5px;color:var(--slate);margin:8px 2px 2px}
 figure.sv iframe{display:block}
 /* Digital twin (as-built) */
