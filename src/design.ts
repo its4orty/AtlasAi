@@ -55,6 +55,39 @@ const esc = (v: unknown): string =>
     .replace(/"/g, "&quot;");
 
 /* ------------------------------------------------------------------ */
+/* Design-step time budgets (fail fast, never hang)                    */
+/* ------------------------------------------------------------------ */
+/**
+ * The design POST must ALWAYS return — the owner's go/no-go gate. Every
+ * external call is capped and the auxiliary work (street view, nearby scan,
+ * facade) runs CONCURRENTLY with the LLM call, so the worst case is bounded:
+ * ~15s LLM + ~11s imagery + ~2s writes ≈ ≤30s, and the common path (fast LLM,
+ * cached imagery) is ~8–15s. The deterministic zoning engine is the final
+ * honest fallback whenever an upstream exceeds its budget.
+ */
+const LLM_BUDGET_MS = 15_000; // total for ALL LLM retry cycles (llm.ts also aborts internally)
+const AUX_BUDGET_MS = 11_000; // street view / nearby scan / facade (started in parallel with the LLM)
+const IMAGERY_BUDGET_MS = 11_000; // full 4-view render set (parallel per view)
+
+/** Resolve with the promise's value, or with `fallback()` if it exceeds `ms`.
+ * The losing promise keeps running in the background (its own internals are
+ * also bounded) but can never hold up the design response. Exported for unit
+ * tests of the fail-fast path. */
+export function withDeadline<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback()), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* Target-use programmes (indicative screening sizes)                  */
 /* ------------------------------------------------------------------ */
 
@@ -790,12 +823,223 @@ export async function runDesignStep(
         llmDesign = null;
       }
     }
-    if (!llmDesign) llmDesign = await requestGemini(llmInput);
     const programRaw = programFor(targetUse);
     // Scale the indicative programme to ~70% of the measured floor area so the
     // sketch reflects the space actually available (leaving 20–30% circulation
     // by design), clamped to a sensible band so degenerate inputs stay sane.
     const zoneSum = programRaw.zones.reduce((acc, z) => acc + z.minArea, 0);
+
+    // Coordinates + postcode: needed by the auxiliary enrichment (street view,
+    // nearby scan, facade) — resolved BEFORE the LLM so those calls can run in
+    // parallel with it (they only need the address/coords, not the design).
+    const discoveryLat = factsAll.find(
+      (f) => f.category === "discovery" && f.key === "latitude",
+    );
+    const discoveryLon = factsAll.find(
+      (f) => f.category === "discovery" && f.key === "longitude",
+    );
+    const streetLat = factsAll.find(
+      (f) => f.category === "imagery" && f.key === "imagery_streetview_lat",
+    );
+    const streetLon = factsAll.find(
+      (f) => f.category === "imagery" && f.key === "imagery_streetview_lon",
+    );
+    const latFact = discoveryLat ?? streetLat;
+    const lonFact = discoveryLon ?? streetLon;
+    const lat = latFact ? Number.parseFloat(latFact.value) : null;
+    const lon = lonFact ? Number.parseFloat(lonFact.value) : null;
+    let nearbyPostcode =
+      factsAll.find((f) => f.category === "address" && f.key === "postcode")
+        ?.value ?? null;
+    if (
+      !nearbyPostcode &&
+      lat != null &&
+      lon != null &&
+      Number.isFinite(lat) &&
+      Number.isFinite(lon)
+    ) {
+      nearbyPostcode =
+        (await withDeadline(
+          reverseGeocodePostcode(lat, lon),
+          AUX_BUDGET_MS,
+          () => null,
+        )) ?? null;
+    }
+
+    // Early source row: imagery/nearby/facade/street-view facts all reference
+    // this source, so it must exist before those calls start.
+    const [src] = await db`
+      INSERT INTO sources (project_id, name, url, notes)
+      VALUES (${projectId}, 'ATLAS AI concept design', NULL,
+        'Concept design and enrichment facts (indicative, not construction information).')
+      RETURNING id`;
+    const sourceId = String(src.id);
+    const generatedAt = new Date().toISOString();
+
+    // --- LLM + auxiliary enrichment, all under hard budgets ----------------
+    // The auxiliary trio (street view, nearby scan, facade) starts NOW, in
+    // parallel with the LLM call, so the design step never waits on them
+    // serially. Each is capped by AUX_BUDGET_MS with an honest failed-status
+    // fallback. The LLM call itself is capped by LLM_BUDGET_MS (and llm.ts
+    // aborts its own fetches at the same budget); the deterministic zoning
+    // engine is the final honest fallback whenever the LLM is slow or absent.
+    type DesignFact = {
+      category: string;
+      key: string;
+      value: string;
+      confidence: number;
+      sourceId: string | null;
+    };
+    const streetFactsPromise = withDeadline(
+      fetchStreetViewFacts(String(proj.address), projectId, sourceId),
+      AUX_BUDGET_MS,
+      () => [
+        {
+          category: "imagery",
+          key: "imagery_streetview_status",
+          value: "failed",
+          confidence: 1,
+          sourceId,
+        },
+      ],
+    );
+    const nearbyAreaM2 =
+      totalArea > 0 ? totalArea : zoneSum > 0 ? zoneSum : null;
+    const nearbyFactsPromise = withDeadline(
+      runNearbyScan({
+        postcode: nearbyPostcode,
+        lat,
+        lon,
+        floorAreaM2: nearbyAreaM2,
+        targetUse,
+        sourceId,
+        generatedAt,
+      }),
+      AUX_BUDGET_MS,
+      () => [
+        {
+          category: "nearby" as const,
+          key: "nearby_status",
+          value: "failed",
+          confidence: 1,
+          sourceId,
+        },
+        {
+          category: "nearby" as const,
+          key: "nearby_count",
+          value: "0",
+          confidence: 1,
+          sourceId,
+        },
+        {
+          category: "nearby" as const,
+          key: "nearby_generated_at",
+          value: generatedAt,
+          confidence: 1,
+          sourceId,
+        },
+      ],
+    );
+    // Best-effort licensed facade reference (Mapillary). Confirmation is
+    // already hard-gated above; the facade remains optional and never blocks.
+    const facadeFactsPromise = (async (): Promise<DesignFact[]> => {
+      if (
+        lat == null ||
+        lon == null ||
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lon)
+      )
+        return [
+          {
+            category: "design",
+            key: "facade_status",
+            value: "unavailable",
+            confidence: 1,
+            sourceId,
+          },
+        ];
+      try {
+        const facade = await withDeadline(
+          Promise.race([
+            fetchFacadeSvg({ lat, lon }),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 9000)),
+          ]),
+          AUX_BUDGET_MS,
+          () => null,
+        );
+        if (facade) {
+          const out: DesignFact[] = [
+            {
+              category: "design",
+              key: "facade_status",
+              value:
+                facade.elevation.status === "generated"
+                  ? "generated"
+                  : "unavailable",
+              confidence: 1,
+              sourceId,
+            },
+          ];
+          if (facade.elevation.status === "generated")
+            out.push({
+              category: "design",
+              key: "facade_svg",
+              value: facade.elevation.svg,
+              confidence: 0.55,
+              sourceId,
+            });
+          if (facade.image.status === "available")
+            for (const [key, value] of [
+              ["facade_source", `Mapillary image ${facade.image.imageId}`],
+              ["facade_attribution", facade.image.attribution],
+              ["facade_generated_at", generatedAt],
+            ] as [string, string][])
+              out.push({
+                category: "design",
+                key,
+                value,
+                confidence: 1,
+                sourceId,
+              });
+          return out;
+        }
+        return [
+          {
+            category: "design",
+            key: "facade_status",
+            value: "unavailable",
+            confidence: 1,
+            sourceId,
+          },
+        ];
+      } catch {
+        return [
+          {
+            category: "design",
+            key: "facade_status",
+            value: "unavailable",
+            confidence: 1,
+            sourceId,
+          },
+        ];
+      }
+    })();
+    // LLM concept call — skipped entirely when there is no room-level space
+    // evidence: its output could never pass validation (no rooms to re-plan,
+    // no floor area to bound), so calling a model 3× would only burn time for
+    // an output the platform would reject. Deterministic zoning is the honest
+    // output for evidence-less projects.
+    let llmSkippedNote = "";
+    if (!llmDesign && (rooms.length === 0 || totalArea <= 0)) {
+      llmSkippedNote =
+        "LLM concept generation skipped: no room-level space evidence in project memory; deterministic zoning used.";
+    } else if (!llmDesign) {
+      llmDesign = await withDeadline(
+        requestGemini(llmInput),
+        LLM_BUDGET_MS,
+        () => null,
+      );
+    }
     const targetAlloc = totalArea > 0 ? totalArea * 0.7 : zoneSum;
     const scale =
       totalArea > 0
@@ -841,7 +1085,6 @@ export async function runDesignStep(
     const circulationPct =
       totalArea > 0 ? Math.round((circulationM2 / totalArea) * 1000) / 10 : 0;
 
-    const generatedAt = new Date().toISOString();
     const svg = renderConceptSvg({
       targetUse,
       programLabel: program.label,
@@ -882,15 +1125,14 @@ export async function runDesignStep(
       `Circulation ${circulationPct}% of floor area left unallocated (typical 20–30%).`,
       `Building form from evidence: ${building.form}. ${building.note} Licensed visual reference is optional; where unavailable, this concept stays conservative.`,
       "Indicative screening concept — NOT for construction, NOT a professional design, no planning/statutory compliance check.",
+      ...(llmSkippedNote ? [llmSkippedNote] : []),
       ...notes,
     ].join(" ");
 
-    const [src] = await db`
-      INSERT INTO sources (project_id, name, url, notes)
-      VALUES (${projectId}, 'ATLAS AI concept design', NULL,
-        ${llmDesign ? "'LLM-generated concept from structured space facts; indicative only, not construction information.'" : "'Rule-based zoning concept generated from project-memory space facts and an indicative target-use programme. Assumptions: room-label/dimension pairing in document order; circulation 20–30%; screening-level zone sizes. Advisory only — not for construction.'"})
-      RETURNING id`;
-    const sourceId = String(src.id);
+    // The source row was created before the LLM so enrichment could start
+    // early; record the LLM/deterministic provenance note now that we know.
+    await db`
+      UPDATE sources SET notes = ${llmDesign ? "'LLM-generated concept from structured space facts; indicative only, not construction information.'" : "'Rule-based zoning concept generated from project-memory space facts and an indicative target-use programme. Assumptions: room-label/dimension pairing in document order; circulation 20–30%; screening-level zone sizes. Advisory only — not for construction.'"} WHERE id = ${sourceId}`;
     const imageryFacts: Array<{
       category: string;
       key: string;
@@ -965,146 +1207,26 @@ export async function runDesignStep(
             sourceId,
           });
       });
+      // Full render set is capped by IMAGERY_BUDGET_MS. Tasks that outlive the
+      // race keep running in the background (they are individually bounded);
+      // their rejections are swallowed so a late failure can never surface as
+      // an unhandled rejection, and any facts they still produce after the
+      // write loop are simply not recorded for this run.
       await Promise.race([
-        Promise.all(imageryWork),
-        new Promise<void>((resolve) => setTimeout(resolve, 16000)),
+        Promise.all(imageryWork.map((task) => task.catch(() => {}))),
+        new Promise<void>((resolve) => setTimeout(resolve, IMAGERY_BUDGET_MS)),
       ]);
     }
-    // Real "current property" imagery: geocode + Google Street View embed (or
-    // static image when GOOGLE_MAPS_API_KEY is configured). Keyless by default;
-    // on failure this records a failed-status fact and the report skips the
-    // section — the design step never blocks on street view.
-    imageryFacts.push(
-      ...(await fetchStreetViewFacts(
-        String(proj.address),
-        projectId,
-        sourceId,
-      )),
-    );
-
-    // Nearby opportunities scan (open-data CANDIDATES, never verified vacancy).
-    // Uses the project's stored coordinates (discovery step; streetview geocode
-    // as fallback) and stored postcode (reverse-geocoded when absent) with the
-    // floor area computed above. Never blocks or throws — on missing inputs or
-    // provider failure it records honest nearby_status=failed facts.
-    const discoveryLat = factsAll.find(
-      (f) => f.category === "discovery" && f.key === "latitude",
-    );
-    const discoveryLon = factsAll.find(
-      (f) => f.category === "discovery" && f.key === "longitude",
-    );
-    const streetLat = factsAll.find(
-      (f) => f.category === "imagery" && f.key === "imagery_streetview_lat",
-    );
-    const streetLon = factsAll.find(
-      (f) => f.category === "imagery" && f.key === "imagery_streetview_lon",
-    );
-    const latFact = discoveryLat ?? streetLat;
-    const lonFact = discoveryLon ?? streetLon;
-    const lat = latFact ? Number.parseFloat(latFact.value) : null;
-    const lon = lonFact ? Number.parseFloat(lonFact.value) : null;
-    let nearbyPostcode =
-      factsAll.find((f) => f.category === "address" && f.key === "postcode")
-        ?.value ?? null;
-    if (
-      !nearbyPostcode &&
-      lat != null &&
-      lon != null &&
-      Number.isFinite(lat) &&
-      Number.isFinite(lon)
-    ) {
-      nearbyPostcode = (await reverseGeocodePostcode(lat, lon)) ?? null;
-    }
-    const nearbyAreaM2 =
-      totalArea > 0 ? totalArea : allocatedM2 > 0 ? allocatedM2 : null;
-    const nearbyFacts = await runNearbyScan({
-      postcode: nearbyPostcode,
-      lat,
-      lon,
-      floorAreaM2: nearbyAreaM2,
-      targetUse,
-      sourceId,
-      generatedAt,
-    });
-
-    // Best-effort licensed facade reference. Confirmation is already hard-gated above;
-    // Mapillary remains optional and never blocks the core design path.
-    const facadeFacts: Array<{
-      category: string;
-      key: string;
-      value: string;
-      confidence: number;
-      sourceId: string | null;
-    }> = [];
-    if (
-      lat != null &&
-      lon != null &&
-      Number.isFinite(lat) &&
-      Number.isFinite(lon)
-    ) {
-      try {
-        const facade = await Promise.race([
-          fetchFacadeSvg({ lat, lon }),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 9000)),
-        ]);
-        if (facade) {
-          facadeFacts.push({
-            category: "design",
-            key: "facade_status",
-            value:
-              facade.elevation.status === "generated"
-                ? "generated"
-                : "unavailable",
-            confidence: 1,
-            sourceId,
-          });
-          if (facade.elevation.status === "generated")
-            facadeFacts.push({
-              category: "design",
-              key: "facade_svg",
-              value: facade.elevation.svg,
-              confidence: 0.55,
-              sourceId,
-            });
-          if (facade.image.status === "available") {
-            for (const [key, value] of [
-              ["facade_source", `Mapillary image ${facade.image.imageId}`],
-              ["facade_attribution", facade.image.attribution],
-              ["facade_generated_at", generatedAt],
-            ] as [string, string][])
-              facadeFacts.push({
-                category: "design",
-                key,
-                value,
-                confidence: 1,
-                sourceId,
-              });
-          }
-        } else
-          facadeFacts.push({
-            category: "design",
-            key: "facade_status",
-            value: "unavailable",
-            confidence: 1,
-            sourceId,
-          });
-      } catch {
-        facadeFacts.push({
-          category: "design",
-          key: "facade_status",
-          value: "unavailable",
-          confidence: 1,
-          sourceId,
-        });
-      }
-    } else
-      facadeFacts.push({
-        category: "design",
-        key: "facade_status",
-        value: "unavailable",
-        confidence: 1,
-        sourceId,
-      });
+    // Join the auxiliary work started in parallel with the LLM call (street
+    // view, nearby scan, facade). Each promise is already capped by
+    // AUX_BUDGET_MS and falls back to honest failed/unavailable facts, so this
+    // await can never block the design step beyond the budget.
+    const [streetFacts, nearbyFacts, facadeFacts] = await Promise.all([
+      streetFactsPromise,
+      nearbyFactsPromise,
+      facadeFactsPromise,
+    ]);
+    imageryFacts.push(...streetFacts);
 
     const factOuts: Array<{
       category: string;

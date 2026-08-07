@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { modelFromSurveyDimensions, validateSurveyDimensions, SURVEYOR_ACCURACY } from "./surveyor";
-import { selectCadTier } from "./routes/api/surveyor";
+import { modelFromSurveyDimensions, validateSurveyDimensions, SURVEYOR_ACCURACY, selectCadTier } from "./surveyor";
 describe("surveyor CAD channel", () => {
   test("validates positive millimetres and sensible bounds", () => {
     expect(validateSurveyDimensions({ widthMm: 0, depthMm: 5000 })).toContain("widthMm");
