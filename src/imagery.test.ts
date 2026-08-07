@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { buildRenderPrompts, requestImage, VIEW_DIMS } from "./imagery";
+import { buildRenderPrompts, CF_VIEW_DIMS, requestImage, VIEW_DIMS, VIEW_SEED } from "./imagery";
 
 const originalFetch = globalThis.fetch;
 const originalToken = process.env.CLOUDFLARE_API_TOKEN;
@@ -32,10 +32,10 @@ describe("buildRenderPrompts", () => {
     for (const result of prompts) {
       const count = result.prompt.trim().split(/\s+/).length;
       expect(count).toBeGreaterThanOrEqual(80);
-      expect(count).toBeLessThanOrEqual(180);
+      expect(count).toBeLessThanOrEqual(220);
       expect(result.prompt).not.toContain("London Road");
       expect(result.prompt).not.toContain("CR0");
-      expect(result.prompt.length).toBeLessThan(1000);
+      expect(result.prompt.length).toBeLessThan(1600);
       expect(result.prompt.toLowerCase()).toContain("barber");
       expect(result.prompt.startsWith("Photorealistic architectural visualization")).toBe(true);
     }
@@ -44,30 +44,71 @@ describe("buildRenderPrompts", () => {
   test("each view has a distinct camera/angle vocabulary", () => {
     const prompts = buildRenderPrompts([
       { key: "total_floor_area_m2", value: "50", confidence: 0.9 },
-    ], "cafe");
+    ], "cafe", { buildingForm: "retail_unit" });
     const byView = Object.fromEntries(prompts.map((p) => [p.view, p.prompt]));
     const street = byView.exterior_street;
     const elevation = byView.exterior_elevation;
     const entrance = byView.exterior_entrance;
     const interior = byView.interior;
 
-    // Street context: 35mm eye level, across the street, neighbours.
-    expect(street).toContain("across the street");
-    expect(street).toContain("35mm");
-    expect(street).toContain("neighbours");
-    // Elevation: frontal, squared camera at 50mm, symmetrical one-point perspective.
-    expect(elevation).toContain("50mm");
-    expect(elevation).toContain("one-point perspective");
-    expect(elevation).toContain("symmetrical");
+    // Street: three-quarter oblique, two-point perspective, subject centred.
+    expect(street).toContain("three-quarter oblique view");
+    expect(street).toContain("two-point perspective");
+    expect(street).toContain("neighbouring shopfronts visible either side");
+    expect(street).toContain("sky visible above the roofline");
+    expect(street).toContain("subject centred");
+    // Elevation: dead-on frontal, camera axis perpendicular, no keystone.
+    expect(elevation).toContain("dead-on frontal view");
+    expect(elevation).toContain("camera axis perpendicular to the facade");
+    expect(elevation).toContain("no keystone");
+    expect(elevation).toContain("doorway centred on the vertical midline");
     expect(elevation).not.toContain("35mm");
-    // Entrance: close-up, tighter framing, shallow depth of field.
+    // Entrance: hard scale anchor — 2-3 m from the door, frame edge to edge.
     expect(entrance.toLowerCase()).toContain("close-up");
     expect(entrance).toContain("shallow depth of field");
+    expect(entrance).toContain("camera two to three metres from the door");
+    expect(entrance).toContain("no whole building in frame");
     expect(entrance).not.toContain("50mm");
-    // Interior: designed-layout interior language.
+    // Interior: designed-layout interior language + v6 camera/space wording.
     expect(interior).toContain("interior");
     expect(interior).toContain("designed layout");
     expect(interior).toContain("listed zones");
+    expect(interior).toContain("one-point perspective from the entrance");
+    expect(interior).toContain("no mezzanine or second floor");
+  });
+  test("v6 building sheet is shared VERBATIM across all three exterior views (retail)", () => {
+    const prompts = buildRenderPrompts([], "barber shop", { buildingForm: "retail_unit" });
+    const exterior = prompts.filter((p) => p.view !== "interior");
+    expect(exterior.length).toBe(3);
+    const sheet = "the same building in every view: a single-storey, ground-floor-only shop unit — roofline directly above the shopfront, no upper floor, no residential; warm red-brick plinth, pale render above, dark grey metal shopfront frame, clear glazing, a recessed oak door, one display window; glazed shopfront with no branding or lettering on the glass; overcast diffuse daylight, soft consistent shadows";
+    for (const p of exterior) {
+      expect(p.prompt).toContain(sheet); // identical string in every exterior view
+    }
+    // The storey guard is repeated inside street + elevation only (upper-storey bleed block).
+    const guard = "Single storey only, roofline above the shopfront.";
+    expect(prompts.find((p) => p.view === "exterior_street")!.prompt).toContain(guard);
+    expect(prompts.find((p) => p.view === "exterior_elevation")!.prompt).toContain(guard);
+    expect(prompts.find((p) => p.view === "exterior_entrance")!.prompt).not.toContain(guard);
+  });
+  test("v6 honesty markers survive in every prompt; barber-only interior fittings", () => {
+    const barber = buildRenderPrompts([], "barber shop", { buildingForm: "retail_unit" });
+    const gym = buildRenderPrompts([], "gym", { buildingForm: "unknown" });
+    for (const result of [...barber, ...gym]) {
+      expect(result.prompt.toLowerCase()).toContain("concept visualisation, not a photograph");
+      expect(result.prompt.toLowerCase()).toContain("no people, text, logos, signage, address or personal data");
+    }
+    // Barber interior carries the designer-approved fittings; gym stays generic.
+    expect(barber.find((p) => p.view === "interior")!.prompt).toContain("barber chairs");
+    const gymInterior = gym.find((p) => p.view === "interior")!.prompt;
+    expect(gymInterior).not.toContain("barber chairs");
+    expect(gymInterior).toContain("suitable generic equipment and fittings");
+  });
+  test("Cloudflare per-view dims: entrance portrait 832x1216, one fixed seed per view", () => {
+    expect(CF_VIEW_DIMS.exterior_street).toEqual({ width: 1024, height: 768 });
+    expect(CF_VIEW_DIMS.exterior_elevation).toEqual({ width: 1024, height: 768 });
+    expect(CF_VIEW_DIMS.exterior_entrance).toEqual({ width: 832, height: 1216 });
+    expect(CF_VIEW_DIMS.interior).toEqual({ width: 1024, height: 768 });
+    expect(new Set(Object.values(VIEW_SEED)).size).toBe(4);
   });
 
   test("industrial form is explicit and unknown form stays conservative", () => {
@@ -95,7 +136,7 @@ describe("buildRenderPrompts", () => {
     for (const result of prompts) {
       const count = result.prompt.trim().split(/\s+/).length;
       expect(count).toBeGreaterThanOrEqual(80);
-      expect(count).toBeLessThanOrEqual(180);
+      expect(count).toBeLessThanOrEqual(220);
       // No personal/property identity anywhere in the prompts.
       expect(result.prompt).not.toContain("Godson");
       expect(result.prompt).not.toContain("Croydon");
@@ -109,7 +150,7 @@ describe("buildRenderPrompts", () => {
     const interior = prompts.find((p) => p.view === "interior")!;
     expect(interior.prompt).toContain("designed layout");
     expect(interior.prompt).toContain("listed zones");
-    expect(interior.prompt.length).toBeLessThan(1000);
+    expect(interior.prompt.length).toBeLessThan(1600);
     // Changing the designed layout must change the cache hash so renders regenerate.
     const different = buildRenderPrompts(
       [{ key: "address", value: "78 Godson Road, Croydon CR0 2TA", confidence: 1 }],
@@ -152,6 +193,24 @@ describe("requestImage", () => {
     expect([...result!.bytes]).toEqual([7, 8]);
   });
 
+  test("sends the SPARK-verified Cloudflare params: per-view dims + guidance + fixed seed", async () => {
+    process.env.CLOUDFLARE_API_TOKEN = "test-token";
+    process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return response(new Uint8Array([1]), "image/jpeg");
+    };
+    await requestImage("street prompt", "exterior_street");
+    expect(bodies[0]).toMatchObject({ width: 1024, height: 768, guidance: 3, seed: VIEW_SEED.exterior_street });
+    bodies.length = 0;
+    await requestImage("entrance prompt", "exterior_entrance");
+    // Entrance is PORTRAIT on the Cloudflare path (832x1216).
+    expect(bodies[0]).toMatchObject({ width: 832, height: 1216, guidance: 3, seed: VIEW_SEED.exterior_entrance });
+    bodies.length = 0;
+    await requestImage("interior prompt", "interior");
+    expect(bodies[0]).toMatchObject({ width: 1024, height: 768, seed: VIEW_SEED.interior });
+  });
   test("decodes Cloudflare base64 JSON image responses", async () => {
     process.env.CLOUDFLARE_API_TOKEN = "test-token";
     process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
