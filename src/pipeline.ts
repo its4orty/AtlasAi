@@ -189,7 +189,20 @@ async function epcFetchCertificate(rrn: string, token: string): Promise<Record<s
 /** Select certificate area, falling back to the EPC register summary row. */
 export function epcAreaFromCertificateOrRegister(cert: Record<string, unknown> | null, row: Record<string, unknown>): { areaM2: number | null; fromRegister: boolean } {
   const numeric = (value: unknown) => { const n = typeof value === "number" ? value : Number.parseFloat(String(value ?? "")); return Number.isFinite(n) && n > 0 ? n : null; };
-  const certificate = numeric(cert?.total_floor_area ?? cert?.total_floor_area_m2);
+  // CEPC (non-domestic) certificates carry the total floor area inside
+  // technical_information (floor_area / gross_internal_area), NOT at the top
+  // level. Check every certificate path before falling back to the register
+  // summary row. IMPORTANT: technical_information.building_level / top-level
+  // building_complexity ("Level 3") is the SBEM assessment complexity level —
+  // it is NOT a storey count and is never mapped to storeys (evidence-integrity).
+  const ti = (cert?.technical_information ?? {}) as Record<string, unknown>;
+  const certificate = [
+    cert?.total_floor_area,
+    cert?.total_floor_area_m2,
+    ti.floor_area,
+    ti.total_floor_area,
+    ti.gross_internal_area,
+  ].map(numeric).find((n): n is number => n !== null) ?? null;
   if (certificate) return { areaM2: certificate, fromRegister: false };
   const register = numeric(row.floor_area ?? row.floorArea ?? row.floor_area_m2 ?? row.total_floor_area ?? row.totalFloorArea ?? row.total_floor_area_m2);
   return { areaM2: register, fromRegister: register !== null };
@@ -218,6 +231,39 @@ export function epcAddressScore(projectAddr: string, row: Record<string, unknown
   return 0;
 }
 function numbersOverlap(a: string,b: string): boolean { const parse=(x:string)=>x.split("-").map(n=>parseInt(n,10)); const [a1,a2]=parse(a),[b1,b2]=parse(b); return Math.min(a1,a2||a1)<=Math.max(b1,b2||b1)&&Math.min(b1,b2||b1)<=Math.max(a1,a2||a1); }
+/**
+ * Pick the best EPC register row across BOTH registers. Identifier-level score
+ * decides; on an exact tie the NON-DOMESTIC register wins: a CEPC at the same
+ * house number is stronger evidence of the commercial unit than a domestic
+ * cert (e.g. 202 London Rd CR0 2TE has both a house EPC and a restaurant
+ * CEPC — the CEPC must win for a commercial redevelopment analysis). A plain
+ * house with no non-domestic cert is unaffected (no tie).
+ */
+export function selectBestEpcMatch(
+  projectAddr: string,
+  domestic: Record<string, unknown>[],
+  nonDomestic: Record<string, unknown>[],
+): { row: Record<string, unknown>; score: number; register: "domestic" | "non-domestic" } | null {
+  let best: { row: Record<string, unknown>; score: number; register: "domestic" | "non-domestic" } | null = null;
+  const consider = (row: Record<string, unknown>, score: number, register: "domestic" | "non-domestic") => {
+    if (!best || score > best.score) { best = { row, score, register }; return; }
+    if (score === best.score && register === "non-domestic" && best.register === "domestic") best = { row, score, register };
+  };
+  for (const row of domestic) consider(row, epcAddressScore(projectAddr, row, "domestic"), "domestic");
+  for (const row of nonDomestic) consider(row, epcAddressScore(projectAddr, row, "non-domestic"), "non-domestic");
+  return best;
+}
+/** Human-readable EPC property/dwelling type, or "" when the value carries no
+ * readable type (numeric codes, absent). Handles {value, language} objects. */
+export function epcPropertyTypeText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (value && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    const text = typeof o.value === "string" ? o.value : typeof o.description === "string" ? o.description : "";
+    return text.trim();
+  }
+  return "";
+}
 
 /** REAL step — free, evidence-backed screening lookups. Each provider is isolated. */
 const discoveryStep: PipelineStepDef = {
@@ -296,16 +342,9 @@ const discoveryStep: PipelineStepDef = {
         const projectAddr = normRow?.value ? String(normRow.value) : ctx.address;
         const domestic = await epcSearchRows(`/api/domestic/search?postcode=${encodeURIComponent(pc)}`, token);
         const nonDomestic = await epcSearchRows(`/api/non-domestic/search?postcode=${encodeURIComponent(pc)}`, token);
-        // Score every row against the project address; best score wins.
-        let best: { row: Record<string, unknown>; score: number; register: "domestic" | "non-domestic" } | null = null;
-        for (const row of domestic) {
-          const score = epcAddressScore(projectAddr, row, "domestic");
-          if (score > (best?.score ?? 0)) best = { row, score, register: "domestic" };
-        }
-        for (const row of nonDomestic) {
-          const score = epcAddressScore(projectAddr, row, "non-domestic");
-          if (score > (best?.score ?? 0)) best = { row, score, register: "non-domestic" };
-        }
+        // Score every row against the project address; best score wins, with a
+        // non-domestic tie-break (a CEPC at the same number is the commercial unit).
+        const best = selectBestEpcMatch(projectAddr, domestic, nonDomestic);
         const matched = best && best.score >= 0.7 ? best : null;
         const matchedAddr = matched ? addressLines(matched.row) : "";
         const note = matched
@@ -343,7 +382,10 @@ const discoveryStep: PipelineStepDef = {
           if (rrn) epcFacts.push(["epc_rrn", rrn, 0.95]);
           if (cert?.registration_date) epcFacts.push(["epc_registration_date", String(cert.registration_date), 0.9]);
           if (cert?.inspection_date) epcFacts.push(["epc_inspection_date", String(cert.inspection_date), 0.9]);
-          const propType = String(cert?.dwelling_type ?? cert?.property_type ?? matched.row.propertyType ?? "").trim();
+          // Property/dwelling type may be a string (CEPC: "Restaurants and
+          // Cafes/..."), a {value, language} object (domestic dwelling_type) or
+          // a numeric code — only a readable text type becomes a fact.
+          const propType = epcPropertyTypeText(cert?.dwelling_type) || epcPropertyTypeText(cert?.property_type) || epcPropertyTypeText(matched.row.propertyType);
           if (propType && propType !== "0") epcFacts.push(["epc_property_type", propType, 0.85]);
           if (cert?.uprn !== undefined && cert?.uprn !== null) epcFacts.push(["epc_uprn", String(cert.uprn), 0.9]);
           const ratingNum = cert?.energy_rating_current ?? cert?.asset_rating_current;
