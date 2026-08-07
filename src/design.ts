@@ -710,7 +710,10 @@ export function deriveBuildingForm(
       form: "house",
       note: "Evidence indicates a house; storeys remain unconfirmed.",
     };
-  if (/retail|shop|class e/.test(text + " " + use))
+  // Class E (commercial) property types — retail, shops, and food-and-drink
+  // units (restaurants/cafes/takeaways) all map to the retail-unit form; the
+  // CEPC property type is evidence, never invented.
+  if (/retail|shop|class e|restaurant|caf|takeaway|food and drink|drinking/.test(text + " " + use))
     return {
       form: "retail_unit",
       note: "Evidence indicates a retail unit; no residential use assumed.",

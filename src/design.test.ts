@@ -22,6 +22,17 @@ describe("deriveBuildingForm", () => {
   test("is unknown without evidence", () => {
     expect(deriveBuildingForm("Some address", []).form).toBe("unknown");
   });
+  test("202 London Rd: restaurant/cafe/takeaway CEPC maps to retail_unit (not industrial, not house)", () => {
+    // The demo property: non-domestic CEPC property type is Class E food-and-drink.
+    const form = deriveBuildingForm("202 London Road, Croydon CR0 2TE", [
+      fact("epc", "epc_register_type", "non-domestic"),
+      fact("epc", "epc_property_type", "Restaurants and Cafes/Drinking Establishments/Takeaways"),
+    ]);
+    expect(form.form).toBe("retail_unit");
+    expect(form.form).not.toBe("industrial_unit");
+    expect(form.form).not.toBe("house");
+    expect(form.form).not.toBe("unknown");
+  });
 });
 
 describe("latest-wins project facts", () => {
