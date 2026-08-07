@@ -18,13 +18,36 @@ export interface DesignContext {
   buildingForm?: "industrial_unit" | "retail_unit" | "house" | "unknown";
   visualReference?: string;
 }
-const VERSION = "imagery-prompt-v5";
+const VERSION = "imagery-prompt-v6";
 /** Per-view Pollinations dimensions: street + elevation landscape, entrance portrait. */
 export const VIEW_DIMS: Record<RenderView, { width: number; height: number }> = {
   exterior_street: { width: 1024, height: 768 },
   exterior_elevation: { width: 1024, height: 768 },
   exterior_entrance: { width: 768, height: 1024 },
   interior: { width: 1024, height: 768 },
+};
+/**
+ * Cloudflare per-view dimensions (SPARK-verified 2026-08-07: the flux-1-schnell
+ * route accepts width/height/guidance/seed — all returned 200). Entrance uses a
+ * taller PORTRAIT canvas (832x1216, both multiples of 16) for the close-up.
+ */
+export const CF_VIEW_DIMS: Record<RenderView, { width: number; height: number }> = {
+  exterior_street: { width: 1024, height: 768 },
+  exterior_elevation: { width: 1024, height: 768 },
+  exterior_entrance: { width: 832, height: 1216 },
+  interior: { width: 1024, height: 768 },
+};
+/**
+ * Fixed per-view seed sent to Cloudflare so v6/v7 runs stay comparable when the
+ * provider honours seeds. NOTE: flux-1-schnell currently ACCEPTS the param but
+ * does not honour it (verified: two identical prompt+seed requests returned
+ * different images) — kept for future compatibility; determinism is not achieved.
+ */
+export const VIEW_SEED: Record<RenderView, number> = {
+  exterior_street: 101,
+  exterior_elevation: 202,
+  exterior_entrance: 303,
+  interior: 404,
 };
 const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
 function spatialBrief(facts: SpatialFact[]): string {
@@ -60,35 +83,79 @@ function interiorFormText(form: string): string {
       ? "a single-storey shop unit"
       : "the confirmed ground-floor premises";
 }
+/**
+ * Shared "building sheet" — the SAME building in every exterior view so the
+ * four-view set reads as one property (v6). Form-specific, mirroring the
+ * exteriorFormText pattern; never invents shopfronts/storeys for forms whose
+ * evidence does not support them.
+ */
+function buildingSheetText(form: string): string {
+  return form === "retail_unit"
+    ? "the same building in every view: a single-storey, ground-floor-only shop unit — roofline directly above the shopfront, no upper floor, no residential; warm red-brick plinth, pale render above, dark grey metal shopfront frame, clear glazing, a recessed oak door, one display window; glazed shopfront with no branding or lettering on the glass; overcast diffuse daylight, soft consistent shadows"
+    : form === "industrial_unit"
+      ? "the same building in every view: a single-storey industrial unit on a business park, flat roof, blockwork or metal-clad walls, a glazed entrance, ground floor only, no upper storey or residential floors; overcast diffuse daylight, soft consistent shadows"
+      : form === "house"
+        ? "the same building in every view: the confirmed house form, with only evidence-supported storeys, no invented upper storeys or residential flats; overcast diffuse daylight, soft consistent shadows"
+        : "the same building in every view: commercial premises, ground floor only, no upper storey assumed, no residential floors; overcast diffuse daylight, soft consistent shadows";
+}
+/** Storey guard repeated inside the street + elevation prompts to block upper-storey bleed. */
+function storeyGuard(form: string): string {
+  return form === "retail_unit"
+    ? "Single storey only, roofline above the shopfront."
+    : form === "industrial_unit"
+      ? "Single storey only, roofline directly above the entrance, no upper storey."
+      : form === "house"
+        ? "Only evidence-supported storeys; no upper storey added."
+        : "Single storey only, no upper storey assumed.";
+}
+/** Street-context neighbours: form-aware so industrial/house prompts never claim shopfronts. */
+function streetViewText(form: string): string {
+  const neighbours =
+    form === "retail_unit"
+      ? "neighbouring shopfronts visible either side"
+      : form === "industrial_unit"
+        ? "neighbouring units visible either side"
+        : form === "house"
+          ? "neighbouring houses visible either side"
+          : "neighbouring premises visible either side";
+  return `Street view: three-quarter oblique view, two-point perspective, ${neighbours}, wide pavement and kerb in the foreground, sky visible above the roofline, subject centred.`;
+}
+/** Use-specific interior fittings: barber uses the designer-approved programme. */
+function interiorFittings(targetUse: string): string {
+  return /barber/i.test(targetUse)
+    ? "mirrors and barber chairs and a reception desk"
+    : "suitable generic equipment and fittings";
+}
 // Shared evidence/constraint block for every exterior view. Never invent
 // storeys, residential uses, shopfronts or typologies beyond the evidence.
 const EXTERIOR_CONSTRAINT =
-  "No storeys or residential use beyond the evidence. No people, text, logos, signage, address or personal data. Generic property only. Calm composition, realistic details, soft shadows. Concept visualisation, not a photograph.";
+  "No storeys or residential use beyond the evidence. No people, text, logos, signage, address or personal data. Generic property only. Concept visualisation, not a photograph.";
 const INTERIOR_CONSTRAINT =
-  "Do not add absent rooms or dimensions. No people, text, logos, signage or personal data. Concept visualisation, not a photograph.";
+  "Do not add absent rooms or dimensions. No people, text, logos, signage, address or personal data. Generic property only. Concept visualisation, not a photograph.";
 export function buildRenderPrompts(facts: SpatialFact[], targetUse: string, design?: DesignContext): RenderPrompt[] {
   const brief = spatialBrief(facts);
   const designed = designBrief(design);
   const common = `Target use: ${targetUse}. Evidence: ${brief}.${designed ? ` Designed layout: ${designed}.` : ""} Approximate only; do not invent measurements.`;
   const form = design?.buildingForm ?? "unknown";
-  const extForm = exteriorFormText(form);
-  const open = `Show ${extForm}, with a welcoming entrance, restrained contemporary materials and soft daylight.`;
+  const open = "Show a welcoming entrance.";
+  const sheet = `The ${buildingSheetText(form)}.`;
+  const guard = storeyGuard(form);
   const views: Array<{ view: RenderView; prompt: string }> = [
     {
       view: "exterior_street",
-      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} ${open} Framed from across the street at 35mm eye level, the building in situ among its neighbours with realistic pavement, kerb and street context, natural perspective and depth of field, realistic scale. ${EXTERIOR_CONSTRAINT}`,
+      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} ${sheet} ${open} ${streetViewText(form)} ${guard} ${EXTERIOR_CONSTRAINT}`,
     },
     {
       view: "exterior_elevation",
-      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} ${open} Direct frontal elevation: camera squared to the facade at 50mm, one-point perspective, facade plane parallel to the frame, symmetrical composition, even diffuse daylight, crisp clean architectural presentation. ${EXTERIOR_CONSTRAINT}`,
+      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} ${sheet} ${open} Frontal elevation: dead-on frontal view, camera axis perpendicular to the facade, vertical edges parallel to the picture frame, no keystone, the full single storey including roofline and cornice fills the frame, doorway centred on the vertical midline with a balanced window either side. ${guard} ${EXTERIOR_CONSTRAINT}`,
     },
     {
       view: "exterior_entrance",
-      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} ${open} Close-up of the entrance zone at eye level: tighter framing filling the frame with the doorway, window and entrance, soft daylight, shallow depth of field, tactile material detail on the door surround and glazing. ${EXTERIOR_CONSTRAINT}`,
+      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} ${sheet} ${open} Entrance close-up: camera two to three metres from the door at eye level; the doorway, its surround and one full display window fill the frame edge to edge; only lintel and cornice above — no whole building in frame; glass reflects soft sky only; tactile material detail on the door surround and glazing, soft daylight, shallow depth of field. ${EXTERIOR_CONSTRAINT}`,
     },
     {
       view: "interior",
-      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} Show the proposed ${targetUse} interior in ${interiorFormText(form)}, matching the designed layout with listed zones, clear circulation, suitable generic equipment and fittings, timber, plaster, glass and durable flooring, daylight with warm practical light, wide eye-level view, realistic construction. ${INTERIOR_CONSTRAINT}`,
+      prompt: `Photorealistic architectural visualization, concept visualisation not a photograph. ${common} Show the proposed ${targetUse} interior in ${interiorFormText(form)}, matching the designed layout with listed zones, clear circulation, one-point perspective from the entrance looking to the rear wall, ceiling visible, no mezzanine or second floor, ${interiorFittings(targetUse)}, muted palette of timber and matte black metal, daylight from the front glazing with warm practical light, realistic construction. ${INTERIOR_CONSTRAINT}`,
     },
   ];
   return views
@@ -96,7 +163,9 @@ export function buildRenderPrompts(facts: SpatialFact[], targetUse: string, desi
       ...v,
       hash: createHash("sha256").update(`${VERSION}|${JSON.stringify(facts)}|${targetUse}|${JSON.stringify(design ?? null)}|${v.view}`).digest("hex"),
     }))
-    .filter((p) => words(p.prompt) >= 80 && words(p.prompt) <= 180);
+    // v6 adds the verbatim building sheet + storey guard + honesty markers, so
+    // prompts run longer than v5: cap raised 180 -> 220 words (1600 chars).
+    .filter((p) => words(p.prompt) >= 80 && words(p.prompt) <= 220 && p.prompt.length <= 1600);
 }
 async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> { return fetch(url, { ...init, signal: AbortSignal.timeout(ms) }); }
 export async function requestImage(prompt: string, view: string): Promise<ImageResult | null> {
@@ -107,13 +176,24 @@ export async function requestImage(prompt: string, view: string): Promise<ImageR
   // @cf/... identifier as one segment yields API error 7000 (No route).
   const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/run/${model}`;
   try {
-    // flux-1-schnell takes prompt-only (no steps/guidance); defaults left as-is.
-    const res = await fetchWithTimeout(endpoint, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ prompt }) }, 12000);
+    // SPARK-verified 2026-08-07: flux-1-schnell accepts optional width, height,
+    // guidance and seed (all returned 200). Per-view dims: street + elevation
+    // landscape, entrance PORTRAIT, interior landscape; fixed seed per view
+    // (accepted but not honoured by the model — see VIEW_SEED note).
+    const dims = CF_VIEW_DIMS[view as RenderView] ?? { width: 1024, height: 768 };
+    const body: Record<string, unknown> = {
+      prompt,
+      width: dims.width,
+      height: dims.height,
+      guidance: 3,
+      seed: VIEW_SEED[view as RenderView],
+    };
+    const res = await fetchWithTimeout(endpoint, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) }, 12000);
     if (!res.ok) throw new Error(`Cloudflare HTTP ${res.status}`);
     const buffer = await res.arrayBuffer(); if (!buffer.byteLength) throw new Error("empty image");
-    const body = new TextDecoder().decode(buffer);
+    const text = new TextDecoder().decode(buffer);
     try {
-      const parsed = JSON.parse(body) as { result?: { image?: unknown } };
+      const parsed = JSON.parse(text) as { result?: { image?: unknown } };
       if (typeof parsed.result?.image === "string" && parsed.result.image.length > 0) {
         const binary = atob(parsed.result.image); const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
         if (!bytes.length) throw new Error("empty decoded image");
