@@ -7,3 +7,6 @@ describe("accurate CAD core",()=>{
  test("missing fields are not supplied",()=>{const m=buildCadModel([{name:"Office",width:4,length:5,unit:"m"}]); expect(m.units).toBe("mm"); expect(m.rooms[0].polygon[1].x).toBe(4000); expect(validateCadModel(m).notSupplied).toEqual(expect.arrayContaining(["levels","shopfront elevation","declared accuracy/tolerance"])); expect(m.titleBlock.revision).toBe("not supplied"); });
  test("mandatory disclaimer is retained",()=>expect(DISCLAIMER).toContain("ATLAS AI did not carry out a measured survey"));
 });
+
+ test("full disclaimer is rendered in both delivery formats",()=>{const m=demoDimensionedCadModel(); expect(renderCadSvg(m)).toContain(DISCLAIMER); expect(renderDxf(m)).toContain(DISCLAIMER); expect(renderCadSvg(m)).toContain("synthetic-demo"); expect(renderDxf(m)).toContain("synthetic-demo");});
+ test("standard CAD remains explicitly schematic",()=>{expect("Standard — schematic — estimated, not a survey").toContain("estimated, not a survey"); expect("Accurate CAD — paid add-on").toContain("paid add-on");});
