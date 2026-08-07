@@ -189,7 +189,20 @@ async function epcFetchCertificate(rrn: string, token: string): Promise<Record<s
 /** Select certificate area, falling back to the EPC register summary row. */
 export function epcAreaFromCertificateOrRegister(cert: Record<string, unknown> | null, row: Record<string, unknown>): { areaM2: number | null; fromRegister: boolean } {
   const numeric = (value: unknown) => { const n = typeof value === "number" ? value : Number.parseFloat(String(value ?? "")); return Number.isFinite(n) && n > 0 ? n : null; };
-  const certificate = numeric(cert?.total_floor_area ?? cert?.total_floor_area_m2);
+  // CEPC (non-domestic) certificates carry the total floor area inside
+  // technical_information (floor_area / gross_internal_area), NOT at the top
+  // level. Check every certificate path before falling back to the register
+  // summary row. IMPORTANT: technical_information.building_level / top-level
+  // building_complexity ("Level 3") is the SBEM assessment complexity level —
+  // it is NOT a storey count and is never mapped to storeys (evidence-integrity).
+  const ti = (cert?.technical_information ?? {}) as Record<string, unknown>;
+  const certificate = [
+    cert?.total_floor_area,
+    cert?.total_floor_area_m2,
+    ti.floor_area,
+    ti.total_floor_area,
+    ti.gross_internal_area,
+  ].map(numeric).find((n): n is number => n !== null) ?? null;
   if (certificate) return { areaM2: certificate, fromRegister: false };
   const register = numeric(row.floor_area ?? row.floorArea ?? row.floor_area_m2 ?? row.total_floor_area ?? row.totalFloorArea ?? row.total_floor_area_m2);
   return { areaM2: register, fromRegister: register !== null };

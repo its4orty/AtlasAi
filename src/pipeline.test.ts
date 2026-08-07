@@ -39,4 +39,26 @@ describe("EPC floor area fallback", () => {
   test("prefers certificate area", () => {
     expect(epcAreaFromCertificateOrRegister({ total_floor_area: 64 }, { floorArea: 65 })).toEqual({ areaM2: 64, fromRegister: false });
   });
+  test("CEPC: reads floor area from technical_information.floor_area when top level has none", () => {
+    // 202 London Rd Croydon style: non-domestic cert with area only inside
+    // technical_information, and a register summary row with NO floor_area.
+    const cert = { technical_information: { floor_area: 74, building_level: "Level 3" } };
+    expect(epcAreaFromCertificateOrRegister(cert, { address_line_1: "202 London Road", postcode: "CR0 2TE" })).toEqual({ areaM2: 74, fromRegister: false });
+  });
+  test("CEPC: technical_information.total_floor_area variant is read", () => {
+    expect(epcAreaFromCertificateOrRegister({ technical_information: { total_floor_area: 120 } }, { floorArea: 90 })).toEqual({ areaM2: 120, fromRegister: false });
+  });
+  test("CEPC: technical_information.gross_internal_area variant is read", () => {
+    expect(epcAreaFromCertificateOrRegister({ technical_information: { gross_internal_area: "95.5" } }, { floorArea: 90 })).toEqual({ areaM2: 95.5, fromRegister: false });
+  });
+  test("CEPC: SBEM building_level alone is not an area — falls back to the register row", () => {
+    // building_level / building_complexity is the SBEM assessment complexity,
+    // NOT a storey count or an area; it must never be read as either.
+    const cert = { technical_information: { building_level: "Level 3" }, building_complexity: "Level 3" };
+    expect(epcAreaFromCertificateOrRegister(cert, { floorArea: 65 })).toEqual({ areaM2: 65, fromRegister: true });
+  });
+  test("CEPC: fallback to register row still works when certificate has technical_information but no area", () => {
+    const cert = { technical_information: { hec_rating: 22 }, current_energy_efficiency_band: "C" };
+    expect(epcAreaFromCertificateOrRegister(cert, { total_floor_area: 74 })).toEqual({ areaM2: 74, fromRegister: true });
+  });
 });
