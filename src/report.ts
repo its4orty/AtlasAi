@@ -13,6 +13,8 @@
  * (e.g. "coverage not established" for a failed provider).
  */
 import { latestFacts } from "./design";
+import { cadQuoteStateHtml } from "./cad-quote";
+import { paymentLink } from "./cad-access";
 
 export interface MemoryFact {
   id: string;
@@ -631,6 +633,31 @@ function reviewSection(facts: MemoryFact[]): string {
   </section>`;
 }
 
+/**
+ * Section 11 — Accurate CAD quoted add-on. Same honest state machine as
+ * /cad-demo: locked (quote form, projectId pre-filled) → requested → unlocked
+ * (download links). Shown on every report for now — the placeholder rule
+ * mirrors /api/cad, which can serve a dimensioned model for any project; the
+ * price itself is quoted per project after the free report. Reads only the
+ * LATEST cad fact per key (facts are append-only). This add-on sits outside
+ * the free report content — the schematic tier stays untouched.
+ */
+function cadQuoteSection(facts: MemoryFact[], projectId: string): string {
+  const cad = new Map<string, MemoryFact>();
+  for (const f of facts) {
+    if (f.category !== "cad") continue;
+    cad.set(f.key, f);
+  }
+  const unlocked = (cad.get("accurate_cad_unlocked")?.value ?? "").toLowerCase() === "true";
+  const requested = (cad.get("cad_quote_requested")?.value ?? "").toLowerCase() === "true";
+  return `<section>
+    <h2><span class="num">11</span>Accurate CAD — quoted add-on</h2>
+    <p class="lede">The schematic above is free. A dimensioned <strong>Accurate CAD</strong> package — built from your own dimensioned documents or professional surveyor figures — is a <strong>quoted add-on</strong>: request a quote after reviewing this report and the owner will come back with a price based on your documents and scope.</p>
+    ${cadQuoteStateHtml({ projectId, unlocked, requested, paymentLink: paymentLink() })}
+    <p class="note">Source: client dimensioned documents or professional surveyor figures. ATLAS AI does not claim to provide a measured survey.</p>
+  </section>`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Document shell                                                      */
 /* ------------------------------------------------------------------ */
@@ -782,6 +809,7 @@ export function renderReportHtml(memory: ProjectMemoryLike): string {
     nearbySection(facts),
     confidenceSection(facts),
     reviewSection(facts),
+    cadQuoteSection(facts, project.id),
     disclaimer,
   ].join("\n");
 
