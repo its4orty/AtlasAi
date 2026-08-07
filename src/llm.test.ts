@@ -92,6 +92,7 @@ afterEach(() => {
   delete process.env.LLM_PROVIDER;
   delete process.env.LLM_API_KEY;
   delete process.env.LLM_BASE_URL;
+  delete process.env.LLM_TOTAL_BUDGET_MS;
 });
 beforeEach(() => {
   // Hermetic: .env injects LLM_PROVIDER=openai at startup — Gemini tests must
@@ -244,6 +245,43 @@ describe("OpenAI-compatible provider", () => {
     try {
       expect(await requestGemini(input)).toBeNull();
       expect(calls).toBe(4);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("a never-resolving provider returns null within the total LLM budget (fail fast, no hang)", async () => {
+    process.env.LLM_PROVIDER = "openai";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1";
+    process.env.LLM_TOTAL_BUDGET_MS = "300";
+    const original = globalThis.fetch;
+    // A fetch that never settles simulates a hung upstream (Groq/CF-style).
+    globalThis.fetch = (async () => new Promise(() => {})) as typeof fetch;
+    try {
+      const t0 = Date.now();
+      const result = await requestGemini(input);
+      const elapsed = Date.now() - t0;
+      expect(result).toBeNull(); // caller falls back to the deterministic engine
+      expect(elapsed).toBeLessThan(3000); // budget honoured, not 20s×N
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("a slow-but-valid response that arrives inside the budget still succeeds", async () => {
+    process.env.LLM_PROVIDER = "openai";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_BASE_URL = "https://api.groq.com/openai/v1";
+    process.env.LLM_TOTAL_BUDGET_MS = "5000";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url, init) => {
+      await new Promise((r) => setTimeout(r, 50)); // slower than a fast call, well under budget
+      expect(init?.signal).toBeDefined();
+      return openAiResponse(JSON.stringify(validDesign));
+    }) as typeof fetch;
+    try {
+      expect(await requestGemini(input)).toEqual(validDesign);
     } finally {
       globalThis.fetch = original;
     }

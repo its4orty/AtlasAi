@@ -41,6 +41,42 @@ export function designInputHash(input: SpaceInput): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
+/**
+ * Hard TOTAL budget for the LLM concept-design path — all retry cycles and the
+ * strict-schema retry combined. The design step must never be held hostage by a
+ * slow/unresponsive model provider: when the budget expires, in-flight fetches
+ * are aborted (AbortController) and every subsequent call fails fast, so the
+ * caller falls back to the deterministic zoning engine. Measured Groq latency
+ * for a full design prompt is ~0.5–3s; 15s covers multiple slow retries.
+ * Overridable via LLM_TOTAL_BUDGET_MS so tests can exercise the timeout path.
+ */
+export function llmTotalBudgetMs(): number {
+  const v = Number(process.env.LLM_TOTAL_BUDGET_MS);
+  return Number.isFinite(v) && v > 0 ? v : 15_000;
+}
+
+/** Race a promise against the remaining LLM budget; rejects on expiry so the
+ * caller's catch handles it exactly like a failed call. The timer is always
+ * cleared once the promise settles, so no stray timers are left behind. */
+function withBudget<T>(promise: Promise<T>, remainingMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("LLM total budget exceeded")),
+      Math.max(1, remainingMs),
+    );
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 const schema = {
   type: "OBJECT",
   properties: {
@@ -331,61 +367,79 @@ async function requestOpenAi(input: SpaceInput): Promise<LlmDesign | null> {
   )
     return null;
   const model = process.env.LLM_MODEL?.trim() || "llama-3.3-70b-versatile";
+  // ONE budget for the whole path (all cycles + the strict-schema retry).
+  // Aborts in-flight fetches at expiry; withBudget additionally bounds each
+  // call against the remaining time so a fetch that ignores abort cannot hang.
+  const controller = new AbortController();
+  const budgetMs = llmTotalBudgetMs();
+  const startedAt = Date.now();
+  const deadline = setTimeout(
+    () => controller.abort(new Error("LLM total budget exceeded")),
+    budgetMs,
+  );
+  const remaining = () => budgetMs - (Date.now() - startedAt);
   let lastError = "validation failed";
-  for (let cycle = 0; cycle < 3; cycle++) {
-    const messages = [
-      {
-        role: "system",
-        content:
-          "Output only valid JSON matching the schema. Never invent space.",
-      },
-      {
-        role: "user",
-        content: promptFor(input, cycle ? lastError : undefined),
-      },
-    ];
-    try {
-      const request = (format: unknown) =>
-        fetch(`${base}/chat/completions`, {
-          method: "POST",
-          signal: AbortSignal.timeout(20000),
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${key}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature: 0.2,
-            max_tokens: 4096,
-            response_format: format,
-          }),
-        });
-      let res =
-        cycle === 0
-          ? await request({
-              type: "json_schema",
-              json_schema: {
-                name: "concept_design",
-                strict: true,
-                schema: openAiSchema,
+  try {
+    for (let cycle = 0; cycle < 3 && remaining() > 0; cycle++) {
+      const messages = [
+        {
+          role: "system",
+          content:
+            "Output only valid JSON matching the schema. Never invent space.",
+        },
+        {
+          role: "user",
+          content: promptFor(input, cycle ? lastError : undefined),
+        },
+      ];
+      try {
+        const request = (format: unknown) =>
+          withBudget(
+            fetch(`${base}/chat/completions`, {
+              method: "POST",
+              signal: controller.signal,
+              headers: {
+                "content-type": "application/json",
+                authorization: `Bearer ${key}`,
               },
-            })
-          : await request({ type: "json_object" });
-      if (cycle === 0 && !res.ok && res.status >= 400 && res.status < 500)
-        res = await request({ type: "json_object" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as any;
-      const parsed = JSON.parse(body?.choices?.[0]?.message?.content);
-      const normalized = normalizeLlmDesign(parsed, input);
-      if (normalized.design) {
-        if (normalized.repaired) repairedDesigns.add(normalized.design);
-        return normalized.design;
+              body: JSON.stringify({
+                model,
+                messages,
+                temperature: 0.2,
+                max_tokens: 4096,
+                response_format: format,
+              }),
+            }),
+            remaining(),
+          );
+        let res =
+          cycle === 0
+            ? await request({
+                type: "json_schema",
+                json_schema: {
+                  name: "concept_design",
+                  strict: true,
+                  schema: openAiSchema,
+                },
+              })
+            : await request({ type: "json_object" });
+        if (cycle === 0 && !res.ok && res.status >= 400 && res.status < 500)
+          res = await request({ type: "json_object" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as any;
+        const parsed = JSON.parse(body?.choices?.[0]?.message?.content);
+        const normalized = normalizeLlmDesign(parsed, input);
+        if (normalized.design) {
+          if (normalized.repaired) repairedDesigns.add(normalized.design);
+          return normalized.design;
+        }
+        lastError = "normalized candidate failed validateLlmDesign";
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : "invalid JSON";
       }
-      lastError = "normalized candidate failed validateLlmDesign";
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : "invalid JSON";
     }
+  } finally {
+    clearTimeout(deadline);
   }
   return null;
 }
@@ -396,41 +450,58 @@ export async function requestGemini(
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key || key === "placeholder" || key.startsWith("your-")) return null;
   const model = process.env.LLM_MODEL?.trim() || "gemini-2.5-flash";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-        {
-          method: "POST",
-          signal: AbortSignal.timeout(20000),
-          headers: {
-            "content-type": "application/json",
-            "x-goog-api-key": key,
-          },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: promptFor(input) }] }],
-            generationConfig: {
-              temperature: 0.2,
-              maxOutputTokens: 4096,
-              responseMimeType: "application/json",
-              responseSchema: schema,
+  // Same hard total budget as the OpenAI-compatible path (aborts + bounds all
+  // attempts) so a slow Gemini can never hang the design step either.
+  const controller = new AbortController();
+  const budgetMs = llmTotalBudgetMs();
+  const startedAt = Date.now();
+  const deadline = setTimeout(
+    () => controller.abort(new Error("LLM total budget exceeded")),
+    budgetMs,
+  );
+  const remaining = () => budgetMs - (Date.now() - startedAt);
+  try {
+    for (let attempt = 0; attempt < 2 && remaining() > 0; attempt++) {
+      try {
+        const res = await withBudget(
+          fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+            {
+              method: "POST",
+              signal: controller.signal,
+              headers: {
+                "content-type": "application/json",
+                "x-goog-api-key": key,
+              },
+              body: JSON.stringify({
+                contents: [{ role: "user", parts: [{ text: promptFor(input) }] }],
+                generationConfig: {
+                  temperature: 0.2,
+                  maxOutputTokens: 4096,
+                  responseMimeType: "application/json",
+                  responseSchema: schema,
+                },
+              }),
             },
-          }),
-        },
-      );
-      if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
-      const body = (await res.json()) as any;
-      const parsed = JSON.parse(
-        body?.candidates?.[0]?.content?.parts?.[0]?.text,
-      );
-      const n = normalizeLlmDesign(parsed, input);
-      if (n.design) {
-        if (n.repaired) repairedDesigns.add(n.design);
-        return n.design;
+          ),
+          remaining(),
+        );
+        if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+        const body = (await res.json()) as any;
+        const parsed = JSON.parse(
+          body?.candidates?.[0]?.content?.parts?.[0]?.text,
+        );
+        const n = normalizeLlmDesign(parsed, input);
+        if (n.design) {
+          if (n.repaired) repairedDesigns.add(n.design);
+          return n.design;
+        }
+      } catch {
+        /* deterministic fallback */
       }
-    } catch {
-      /* deterministic fallback */
     }
+  } finally {
+    clearTimeout(deadline);
   }
   return null;
 }

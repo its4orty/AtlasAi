@@ -33,3 +33,28 @@ describe("latest-wins project facts", () => {
     expect(deriveBuildingForm("Unit 4 Mill Lane", [fact("epc", "epc_register_type", "domestic"), fact("epc", "epc_property_type", "End-terrace house"), fact("epc", "epc_register_type", "non-domestic"), fact("epc", "epc_property_type", "B8 Storage or Distribution")]).form).toBe("industrial_unit");
   });
 });
+
+describe("design-step deadlines (fail fast, never hang)", () => {
+  test("withDeadline resolves to the fallback when the promise is slower than the deadline", async () => {
+    const { withDeadline } = await import("./design");
+    const slow = new Promise<string>((resolve) => setTimeout(() => resolve("late"), 2000));
+    const t0 = Date.now();
+    const result = await withDeadline(slow, 100, () => "fallback");
+    expect(result).toBe("fallback");
+    expect(Date.now() - t0).toBeLessThan(1500);
+  });
+
+  test("withDeadline returns the promise value when it wins the race", async () => {
+    const { withDeadline } = await import("./design");
+    const t0 = Date.now();
+    expect(await withDeadline(Promise.resolve("fast"), 1000, () => "fallback")).toBe("fast");
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  test("withDeadline propagates a promise rejection (upstreams that throw still surface)", async () => {
+    const { withDeadline } = await import("./design");
+    await expect(
+      withDeadline(Promise.reject(new Error("boom")), 500, () => "fallback"),
+    ).rejects.toThrow("boom");
+  });
+});
