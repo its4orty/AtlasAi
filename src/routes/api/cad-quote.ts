@@ -17,7 +17,12 @@ export const Route = createFileRoute("/api/cad-quote")({ server: { handlers: {
     const input = { projectId: String(body.projectId ?? ""), name: String(body.name ?? "").trim(), email: String(body.email ?? "").trim(), docs: Array.isArray(body.docs) ? body.docs.map(String).slice(0, 10) : [], surveyVisit: String(body.surveyVisit ?? "unsure"), notes: String(body.notes ?? "").trim().slice(0, 2000) };
     const error = validateCadQuote(input); if (error) return Response.json({ error }, { status: 400 });
     await ensureSchema();
-    const source = await sql()`INSERT INTO sources (project_id,name,notes) VALUES (${input.projectId},'Client quote request','Source: client-quote-request; submitted ${new Date().toISOString()}') RETURNING id`;
+    // NOTE: never interpolate a value inside a SQL string literal — the neon
+    // driver's $n placeholder would land inside the quotes and the prepared
+    // statement would reject the extra bind parameter. Build the notes string
+    // first and pass it as a bound parameter.
+    const submitted = new Date().toISOString();
+    const source = await sql()`INSERT INTO sources (project_id,name,notes) VALUES (${input.projectId},'Client quote request',${`Source: client-quote-request; submitted ${submitted}`}) RETURNING id`;
     const sid = source[0].id;
     const add = async (key:string,value:string) => sql()`INSERT INTO facts (project_id,category,key,value,confidence,source_id) VALUES (${input.projectId},'cad',${key},${value},1.0,${sid})`;
     await add('cad_quote_requested','true'); await add('cad_quote_contact', JSON.stringify({ name: input.name, email: input.email })); await add('cad_quote_docs', JSON.stringify(input.docs)); await add('cad_quote_survey_visit', input.surveyVisit); await add('cad_quote_notes', input.notes);
