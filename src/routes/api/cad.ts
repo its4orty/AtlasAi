@@ -1,5 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { demoDimensionedCadModel, renderCadSvg, renderDxf } from "~/cad";
+import { sql } from "~/db";
+import { ensureSchema } from "~/project-schema";
+import { extractPdfDimensions, modelFromDimensions } from "~/cad-dimensions";
 import { accurateCadLockedResponse, accurateCadUnlocked } from "~/cad-access";
 
 export const Route = createFileRoute("/api/cad")({ server: { handlers: {
@@ -8,7 +11,18 @@ export const Route = createFileRoute("/api/cad")({ server: { handlers: {
     const projectId = url.searchParams.get("projectId") || "17";
     const format = url.searchParams.get("format") === "svg" ? "svg" : "dxf";
     if (!await accurateCadUnlocked(projectId)) return accurateCadLockedResponse();
-    const model = demoDimensionedCadModel();
+    let model = demoDimensionedCadModel();
+    if (process.env.DATABASE_URL) {
+      await ensureSchema();
+      const docs = await sql()`SELECT filename,path FROM documents WHERE project_id=${projectId} ORDER BY id DESC`;
+      for (const doc of docs) {
+        if (!String(doc.mime ?? "application/pdf").includes("pdf") && !String(doc.filename).toLowerCase().endsWith(".pdf")) continue;
+        try {
+          const dimensions = await extractPdfDimensions(String(doc.path), String(doc.filename));
+          if (dimensions.length) { model = modelFromDimensions(dimensions); break; }
+        } catch { /* unavailable/unreadable source remains the honest demo model */ }
+      }
+    }
     if (format === "svg") return new Response(renderCadSvg(model), { headers: { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "no-store" } });
     return new Response(renderDxf(model), { headers: { "content-type": "application/dxf", "content-disposition": `attachment; filename="atlas-accurate-cad-${projectId}.dxf"`, "cache-control": "no-store" } });
   },

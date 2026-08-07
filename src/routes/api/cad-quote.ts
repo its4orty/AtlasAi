@@ -17,6 +17,8 @@ export const Route = createFileRoute("/api/cad-quote")({ server: { handlers: {
     const input = { projectId: String(body.projectId ?? ""), name: String(body.name ?? "").trim(), email: String(body.email ?? "").trim(), docs: Array.isArray(body.docs) ? body.docs.map(String).slice(0, 10) : [], surveyVisit: String(body.surveyVisit ?? "unsure"), notes: String(body.notes ?? "").trim().slice(0, 2000) };
     const error = validateCadQuote(input); if (error) return Response.json({ error }, { status: 400 });
     await ensureSchema();
+    const [project] = await sql()`SELECT id FROM projects WHERE id = ${input.projectId}`;
+    if (!project) return Response.json({ error: "Project not found" }, { status: 400 });
     // NOTE: never interpolate a value inside a SQL string literal — the neon
     // driver's $n placeholder would land inside the quotes and the prepared
     // statement would reject the extra bind parameter. Build the notes string
